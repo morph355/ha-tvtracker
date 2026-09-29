@@ -7,7 +7,14 @@ from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tvtracker.const import DOMAIN
-from test_logic import RAW_TV
+from test_logic import ADB_TEXT, RAW_TV
+
+RAW_WREXHAM = {
+    "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "status": "Returning Series",
+    "seasons": [{"season_number": 1, "episode_count": 20}],
+    "last_episode_to_air": {"season_number": 1, "episode_number": 20},
+    "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "Disney Plus"}]}}},
+}
 
 pytest.importorskip("pytest_homeassistant_custom_component")
 
@@ -24,13 +31,16 @@ def fake_tmdb(monkeypatch):
             return {}
         if path == "/search/tv":
             q = params["query"].lower()
-            hits = [{"id": 95396, "name": "Severance", "first_air_date": "2022-02-18", "popularity": 9}]
+            hits = [{"id": 95396, "name": "Severance", "first_air_date": "2022-02-18", "popularity": 9},
+                    {"id": 1234, "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "popularity": 8}]
             return {"results": [h for h in hits if q in h["name"].lower()]}
         if path == "/search/movie":
             return {"results": [{"id": 438631, "title": "Dune", "release_date": "2021-10-01", "popularity": 5}]
                     if "dune" in params["query"].lower() else []}
         if path == "/tv/95396":
             return RAW_TV
+        if path == "/tv/1234":
+            return {**RAW_WREXHAM}
         if path == "/movie/438631":
             return {"title": "Dune", "release_date": "2021-10-01", "runtime": 155,
                     "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "Netflix"}]}}}}
@@ -223,3 +233,66 @@ async def test_dashboard_templates_render(hass, setup, freezer):
     assert "- Netflix" in out["My streaming services"]
     for k, v in out.items():
         print(f"=== {k} ===\n{v}")
+
+
+async def test_adb_media_session_gives_disney_title_and_tracks_episodes(hass, setup, freezer):
+    """Disney+ only publishes its title to Android's media session (via ADB)."""
+    from homeassistant.core import ServiceCall
+
+    ADB = "media_player.android_tv_192_168_3_131"
+    box = {"pos": 5_000, "state": 3}
+
+    async def fake_adb(call: ServiceCall):
+        text = ADB_TEXT.replace("state=3, position=234528", f"state={box['state']}, position={box['pos']}")
+        cur = hass.states.get(ADB)
+        hass.states.async_set(ADB, cur.state, {**cur.attributes, "adb_response": text})
+
+    hass.services.async_register("androidtv", "adb_command", fake_adb)
+
+    await call(hass, "add_to_list", list="Shows", title="Welcome to Wrexham")
+
+    async def show(adb_state):
+        hass.states.async_set("media_player.shield_2", "on",
+            {"app_id": "com.disney.disneyplus", "app_name": "com.disney.disneyplus"})
+        # a stale Cast entity holding the Spotify podcast, exactly as on the real SHIELD
+        hass.states.async_set("media_player.shield", "paused",
+            {"app_id": "AndroidNativeApp", "app_name": "Spotify", "media_title": "S13 EP21: Sneaky Sasquatch "})
+        hass.states.async_set(ADB, adb_state,
+            {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": None})
+        await hass.async_block_till_done()
+
+    await show("playing")
+    now = hass.states.get("sensor.tv_tracker_now_watching_living_room")
+    assert now.state == "Welcome to Wrexham", now  # not the Spotify podcast
+    assert now.attributes["service"] == "Disney+"
+
+    # 25 minutes in, then autoplay starts the next episode (position resets)
+    freezer.tick(timedelta(minutes=25))
+    box["pos"] = 1_500_000
+    hass.states.async_set(ADB, "paused", {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": None})
+    await hass.async_block_till_done()
+    hass.states.async_set(ADB, "playing", {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": None})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=1))
+    box["pos"] = 3_000
+    hass.states.async_set(ADB, "paused", {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": None})
+    await hass.async_block_till_done()
+    hass.states.async_set(ADB, "playing", {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": None})
+    await hass.async_block_till_done()
+
+    # episode 1 was logged and counted
+    lib = (await call(hass, "get_library"))
+    wrex = next(i for i in lib["continue_watching"] if i["title"] == "Welcome to Wrexham")
+    assert wrex["progress"] == "S1E1" and wrex["next"] == "S1E2"
+
+    # 25 more minutes of episode 2, then the TV goes off
+    freezer.tick(timedelta(minutes=25))
+    for e in ("media_player.shield_2", ADB):
+        hass.states.async_set(e, "off", {"adb_response": None} if e == ADB else {})
+    await hass.async_block_till_done()
+    lib = (await call(hass, "get_library"))
+    wrex = next(i for i in lib["continue_watching"] if i["title"] == "Welcome to Wrexham")
+    assert wrex["progress"] == "S1E2"
+    titles = [h["title"] for h in lib["recent_history"]]
+    assert titles.count("Welcome to Wrexham") == 2 and not any("Sasquatch" in (t or "") for t in titles)
+    assert wrex["on_my_services"] == ["Disney+"]

@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ADB_POLL_SECONDS,
     MIN_COUNT_SECONDS,
     MIN_SESSION_SECONDS,
     REFRESH_INTERVAL_HOURS,
@@ -21,7 +22,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .library import Library
-from .logic import RoomTracker, observe
+from .logic import MEDIA_SESSION_CMD, RoomTracker, observe, parse_media_sessions
 from .tmdb import TMDB, TMDBError
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class TVTrackerHub:
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.library = Library()
         self.trackers = {r["name"]: RoomTracker(r["name"]) for r in rooms}
+        self._sessions: dict[str, list[dict[str, Any]]] = {}
+        self._polling: set[str] = set()
         self._unsubs: list[Any] = []
 
     # ---- lifecycle -------------------------------------------------------
@@ -59,6 +62,11 @@ class TVTrackerHub:
         self._unsubs.append(
             async_track_time_interval(
                 self.hass, self._scheduled_refresh, timedelta(hours=REFRESH_INTERVAL_HOURS)
+            )
+        )
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass, self._poll_all_adb, timedelta(seconds=ADB_POLL_SECONDS)
             )
         )
         self.hass.async_create_task(self.async_refresh_all())
@@ -84,8 +92,17 @@ class TVTrackerHub:
     # ---- room tracking ---------------------------------------------------
     def _make_handler(self, room: str):
         @callback
-        def _handle(_event: Any) -> None:
+        def _handle(event: Any) -> None:
             self._evaluate(room)
+            # When the ADB entity changes state (play/pause/app switch), look
+            # at the media session straight away instead of waiting for the timer.
+            old, new = event.data.get("old_state"), event.data.get("new_state")
+            if (
+                new is not None
+                and "adb_response" in new.attributes
+                and (old is None or old.state != new.state)
+            ):
+                self.hass.async_create_task(self._poll_adb(room))
 
         return _handle
 
@@ -96,10 +113,55 @@ class TVTrackerHub:
             st = self.hass.states.get(entity_id)
             if st is not None:
                 states.append({"state": st.state, "attributes": dict(st.attributes)})
-        closed = self.trackers[room].update(observe(states), dt_util.utcnow())
+        closed = self.trackers[room].update(
+            observe(states, self._sessions.get(room)), dt_util.utcnow()
+        )
         for session in closed:
             self._record(session)
         self.changed()
+
+    # ---- ADB media-session polling --------------------------------------
+    def _adb_entity(self, room: str) -> str | None:
+        """The room's Android Debug Bridge entity, if it has one and is in use."""
+        for entity_id in next(r["entities"] for r in self.rooms if r["name"] == room):
+            st = self.hass.states.get(entity_id)
+            if (
+                st is not None
+                and "adb_response" in st.attributes
+                and st.state in ("playing", "paused", "on", "buffering")
+            ):
+                return entity_id
+        return None
+
+    async def _poll_adb(self, room: str) -> None:
+        entity_id = self._adb_entity(room)
+        if entity_id is None:
+            if self._sessions.pop(room, None) is not None:
+                self._evaluate(room)
+            return
+        if room in self._polling:
+            return
+        self._polling.add(room)
+        try:
+            await self.hass.services.async_call(
+                "androidtv",
+                "adb_command",
+                {"entity_id": entity_id, "command": MEDIA_SESSION_CMD},
+                blocking=True,
+            )
+            st = self.hass.states.get(entity_id)
+            text = st.attributes.get("adb_response") if st else None
+            self._sessions[room] = parse_media_sessions(text)
+            self._evaluate(room)
+        except Exception as err:  # noqa: BLE001 - never let a poll break tracking
+            _LOGGER.debug("ADB poll for %s failed: %s", room, err)
+        finally:
+            self._polling.discard(room)
+
+    async def _poll_all_adb(self, _now: datetime) -> None:
+        for room in self.trackers:
+            if self.trackers[room].current is not None or self._adb_entity(room):
+                await self._poll_adb(room)
 
     def now_watching(self, room: str) -> dict[str, Any] | None:
         return self.trackers[room].current

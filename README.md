@@ -16,15 +16,24 @@ Track what the household watches on the Android TVs, where, and what to watch ne
 2. Restart Home Assistant.
 3. Create a free account at [themoviedb.org](https://www.themoviedb.org), then *Settings → API* and copy the API key (the v3 key or the v4 read token both work).
 4. *Settings → Devices & services → Add integration → TV Tracker*. Paste the key and your country code (default `GB`).
-5. *Configure* on the integration to set up rooms. The defaults are:
+5. *Configure* on the integration to set up rooms. Each room lists the `media_player` entities that belong to one TV. The defaults are:
 
    | Room | Entities |
    |---|---|
    | Family Room | `media_player.family_room_tv` |
    | Bedroom | `media_player.master_room_tv` |
-   | Living Room | `media_player.shield`, `media_player.shield_2` |
+   | Living Room | `media_player.shield`, `media_player.shield_2`, `media_player.android_tv_192_168_3_131` |
 
-   The SHIELD appears twice in HA: the Google Cast entity gives video titles, the Android TV (ADB) entity gives the app. Put both in one room and TV Tracker combines them.
+   A TV can show up as up to three entities, and each knows something different:
+
+   | Integration | Gives | Doesn't give |
+   |---|---|---|
+   | **Android TV Remote** | the app in the foreground | any title |
+   | **Google Cast** | title + channel for apps that cast (YouTube) | titles for Disney+, Netflix… playing natively; can go stale |
+   | **Android Debug Bridge (ADB)** | the app **and the current title/position** from Android's media session (Disney+ works) | season/episode numbers |
+
+   Put all of a TV's entities in one room and TV Tracker combines them. **ADB is what makes Disney+ (and similar apps) show a title**, and it is optional per TV:
+   on the TV enable *Developer options → Network debugging*, then add *Settings → Devices & services → Android Debug Bridge* with the TV's IP and add the new `media_player` to the room.
 6. Optional: paste `dashboard/tvtracker.yaml` into a new dashboard's raw configuration editor (room names in the "Now watching" card must match your rooms).
 
 ## Using it
@@ -61,12 +70,14 @@ If a title matches more than one thing (e.g. a TV show and a movie with the same
 
 - A session shorter than 2 minutes is ignored (channel surfing).
 - A session of 10+ minutes on a title in your lists counts as watched: movies are marked watched; for shows the reported season/episode is used, or otherwise progress advances by one episode.
+- While a TV with an ADB entity is in use, TV Tracker reads its media session every 30 s (and whenever it plays/pauses) to get the title.
 - Progress only moves forward automatically (a re-watch won't reset it). `set_progress` can move it anywhere.
 - Status is one of *want to watch*, *upcoming* (not released), *watching*, *caught up* (up to date on a running show) or *finished*.
 
 ## Limitations
 
-- Titles depend on what each app tells Android TV. YouTube (via Cast) usually gives the video and channel; other apps often give only the app name. Those sessions are logged without a title; fill them in with `log_watch`.
+- Titles depend on what each app publishes. YouTube (Cast) gives video + channel; Disney+ gives the title through ADB; other apps (Netflix, iPlayer…) are untested and may publish nothing, in which case the session is logged without a title. Fill those in with `log_watch`.
+- Apps publish a title but not season/episode numbers, so watching a show on the watchlist advances it by one episode per viewing. Back-to-back episodes (autoplay) are detected when the playback position jumps back to the start after most of an episode was played. Correct it any time with `set_progress`.
 - Availability comes from TMDB/JustWatch for the configured country and can lag reality.
 - If HA restarts mid-viewing, the open session is closed and logged at shutdown.
 

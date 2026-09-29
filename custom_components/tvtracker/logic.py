@@ -137,6 +137,7 @@ class Observation:
     season: int | None = None
     episode: int | None = None
     channel: str | None = None
+    position_ms: int | None = None
 
 
 def _as_int(value: Any) -> int | None:
@@ -145,13 +146,57 @@ def _as_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
 
+# Android media sessions (from `dumpsys media_session`, via the ADB integration)
+MEDIA_SESSION_CMD = (
+    "dumpsys media_session | grep -E 'package=|metadata:|state=PlaybackState'"
+)
+SESSION_PAUSED, SESSION_PLAYING, SESSION_BUFFERING = 2, 3, 6
+_SESSION_RE = re.compile(r"package=(?P<pkg>\S+)(?P<body>.*?)(?=\n\s*package=|\Z)", re.S)
 
-def observe(states: list[dict[str, Any]]) -> Observation | None:
+
+def parse_media_sessions(text: str | None) -> list[dict[str, Any]]:
+    """Parse the output of MEDIA_SESSION_CMD into one dict per app session.
+
+    Each: {package, state (Android PlaybackState int or None), position_ms,
+    title, subtitle}. Apps publish "title, subtitle, description" joined by
+    ", " so a title that itself contains ", " is rebuilt from the leading parts.
+    """
+    out: list[dict[str, Any]] = []
+    for m in _SESSION_RE.finditer(text or ""):
+        body = m.group("body")
+        st = re.search(r"PlaybackState \{state=(\d+), position=(-?\d+)", body)
+        md = re.search(r"metadata: size=\d+, description=(.*)", body)
+        title = subtitle = None
+        if md:
+            parts = md.group(1).strip().split(", ")
+            title = ", ".join(parts[:-2]) if len(parts) >= 3 else parts[0]
+            if len(parts) >= 3 and parts[-2] != "null":
+                subtitle = parts[-2].strip() or None
+            title = title.strip() or None
+            if title == "null":
+                title = None
+        out.append(
+            {
+                "package": m.group("pkg"),
+                "state": int(st.group(1)) if st else None,
+                "position_ms": int(st.group(2)) if st else None,
+                "title": title,
+                "subtitle": subtitle,
+            }
+        )
+    return out
+
+
+def observe(
+    states: list[dict[str, Any]], sessions: list[dict[str, Any]] | None = None
+) -> Observation | None:
     """Combine a room's media_player states into one Observation (or None).
 
     Each state is {"state": str, "attributes": dict}. The app comes from any
     active entity; the title only from entities that are actually playing or
     paused *and* agree with the chosen app (Cast titles go stale when idle).
+    `sessions` (see parse_media_sessions) fills in a title the entities lack,
+    e.g. Disney+, which only publishes it to Android's media session.
     """
     # The foreground app is authoritative from an entity that is simply "on"
     # (Android TV Remote / ADB report only the foreground app). A paused or
@@ -197,7 +242,31 @@ def observe(states: list[dict[str, Any]]) -> Observation | None:
         if chosen[0] == "youtube":
             obs.channel = attrs.get("media_artist")
         break
+
+    if sessions:
+        packages = {
+            (st.get("attributes") or {}).get("app_id")
+            for st in states
+            if "." in ((st.get("attributes") or {}).get("app_id") or "")
+            and classify((st.get("attributes") or {}).get("app_id"), None)[1] == chosen[1]
+        }
+        for sess in sessions:
+            if (
+                sess["package"] in packages
+                and sess["state"] in (SESSION_PLAYING, SESSION_PAUSED, SESSION_BUFFERING)
+                and sess["title"]
+            ):
+                if obs.title is None:
+                    obs.title = sess["title"]
+                obs.position_ms = sess["position_ms"]
+                break
     return obs
+
+
+# Back-to-back episodes (autoplay) keep the same title. A new episode is
+# assumed when the position jumps back to the start after most of one was played.
+NEW_EPISODE_PLAYED_MS = 600_000
+NEW_EPISODE_START_MS = 120_000
 
 
 class RoomTracker:
@@ -219,7 +288,19 @@ class RoomTracker:
             "channel": obs.channel,
             "start": now,
             "end": None,
+            "_last_pos": obs.position_ms,
         }
+
+    @staticmethod
+    def _next_episode_started(cur: dict[str, Any], obs: Observation) -> bool:
+        last, pos = cur.get("_last_pos"), obs.position_ms
+        return (
+            cur["category"] == "tv_movies"
+            and last is not None
+            and pos is not None
+            and last > NEW_EPISODE_PLAYED_MS
+            and pos < NEW_EPISODE_START_MS
+        )
 
     def update(self, obs: Observation | None, now: datetime) -> list[dict[str, Any]]:
         """Feed the latest observation; returns sessions that just closed."""
@@ -232,7 +313,11 @@ class RoomTracker:
                 and obs.service == cur["service"]
                 and (obs.title == cur["title"] or obs.title is None or cur["title"] is None)
             )
+            if same and obs is not None and self._next_episode_started(cur, obs):
+                same = False
             if same and obs is not None:
+                if obs.position_ms is not None:
+                    cur["_last_pos"] = obs.position_ms
                 if cur["title"] is None and obs.title:
                     cur.update(
                         title=obs.title,

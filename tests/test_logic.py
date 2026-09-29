@@ -11,6 +11,7 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    parse_media_sessions,
     parse_providers,
 )
 
@@ -205,3 +206,76 @@ def test_match_score():
     assert logic.match_score("Severance", None, "Severance: The Chair")
     assert not logic.match_score("Up", None, "Upload")
     assert not logic.match_score("Up", None, "Up Here")
+
+
+# Real output from the SHIELD (`dumpsys media_session`) while Disney+ played
+# Welcome to Wrexham, with a stale paused Spotify podcast and an idle Netflix.
+ADB_TEXT = """package=com.disney.disneyplus
+      state=PlaybackState {state=3, position=234528, buffered position=0, speed=1.0, updated=5381215743, actions=879, custom actions=[], active item id=-1, error=null}
+      metadata: size=3, description=Welcome to Wrexham, null, null
+      package=com.spotify.tv.android
+      state=PlaybackState {state=2, position=2647093, buffered position=0, speed=0.0, updated=5366468773, actions=7319548, custom actions=[], active item id=0, error=null}
+      metadata: size=21, description=S13 EP21: Sneaky Sasquatch , Parenting Hell with Rob Beckett and Josh Widdicombe, null
+      package=com.netflix.ninja
+      metadata: null"""
+
+
+def test_parse_media_sessions_real_output():
+    disney, spotify, netflix = parse_media_sessions(ADB_TEXT)
+    assert disney == {"package": "com.disney.disneyplus", "state": 3, "position_ms": 234528,
+                      "title": "Welcome to Wrexham", "subtitle": None}
+    assert spotify["state"] == 2 and spotify["title"] == "S13 EP21: Sneaky Sasquatch"
+    assert spotify["subtitle"].startswith("Parenting Hell")
+    assert netflix == {"package": "com.netflix.ninja", "state": None, "position_ms": None,
+                       "title": None, "subtitle": None}
+    assert parse_media_sessions(None) == [] and parse_media_sessions("") == []
+
+
+def test_parse_media_sessions_title_with_comma():
+    text = "package=a.b\n  state=PlaybackState {state=3, position=5, x}\n  metadata: size=3, description=Hello, World, null, null"
+    assert parse_media_sessions(text)[0]["title"] == "Hello, World"
+
+
+def test_observe_fills_title_from_adb_media_session():
+    """Disney+ is the foreground app but only the media session has the title."""
+    remote = {"state": "on", "attributes": {"app_id": "com.disney.disneyplus",
+              "app_name": "com.disney.disneyplus"}}
+    stale_cast = {"state": "paused", "attributes": {"app_name": "Spotify", "app_id": "AndroidNativeApp",
+                  "media_title": "S13 EP21: Sneaky Sasquatch "}}
+    obs = observe([remote, stale_cast], parse_media_sessions(ADB_TEXT))
+    assert (obs.service, obs.title, obs.position_ms) == ("Disney+", "Welcome to Wrexham", 234528)
+    # the stale Spotify session must never be picked up for Disney+
+    assert observe([remote], [s for s in parse_media_sessions(ADB_TEXT) if s["package"] != "com.disney.disneyplus"]).title is None
+    # paused Disney+ session still counts; a stopped/none one does not
+    paused = [{**parse_media_sessions(ADB_TEXT)[0], "state": 2}]
+    assert observe([remote], paused).title == "Welcome to Wrexham"
+    stopped = [{**parse_media_sessions(ADB_TEXT)[0], "state": 1}]
+    assert observe([remote], stopped).title is None
+
+
+def test_cast_title_wins_over_adb_and_youtube_still_works():
+    cast = {"state": "playing", "attributes": {"app_id": "2C6A6E3D", "app_name": "YouTube",
+            "media_title": "A video", "media_artist": "BBC News"}}
+    adb = {"state": "playing", "attributes": {"app_id": "com.google.android.youtube.tv", "app_name": "YouTube"}}
+    sessions = [{"package": "com.google.android.youtube.tv", "state": 3, "position_ms": 10,
+                 "title": "Something else", "subtitle": None}]
+    obs = observe([cast, adb], sessions)
+    assert obs.title == "A video" and obs.channel == "BBC News"
+
+
+def test_room_tracker_detects_back_to_back_episodes():
+    rt = RoomTracker("Living Room")
+    ep = lambda pos: Observation("tv_movies", "Disney+", title="Welcome to Wrexham", position_ms=pos)
+    rt.update(ep(5_000), t(0))
+    rt.update(ep(1_500_000), t(25))            # well into episode 1
+    assert rt.update(ep(1_600_000), t(26)) == []
+    closed = rt.update(ep(3_000), t(45))       # position reset: episode 2 started
+    assert len(closed) == 1 and closed[0]["title"] == "Welcome to Wrexham"
+    assert rt.current["start"] == t(45)
+    # pausing and resuming (position keeps increasing) is one session
+    rt.update(ep(200_000), t(48))
+    assert rt.update(ep(210_000), t(60)) == []
+    # restarting right at the start of an episode you'd barely watched is NOT a new episode
+    rt2 = RoomTracker("x")
+    rt2.update(ep(90_000), t(0))
+    assert rt2.update(ep(2_000), t(3)) == []

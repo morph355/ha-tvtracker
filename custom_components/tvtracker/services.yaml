@@ -66,6 +66,7 @@ log_watch:
     year: {selector: {number: {min: 1900, max: 2100, mode: box}}}
     season: {selector: {number: {min: 1, max: 100, mode: box}}}
     episode: {selector: {number: {min: 1, max: 1000, mode: box}}}
+    episode_title: {description: "The episode's name; used to find the season and episode when you don't give them", selector: {text: {}}}
     service: {example: "Apple TV", selector: {text: {}}}
     room: {example: "Bedroom", selector: {text: {}}}
     channel: {description: YouTube channel, selector: {text: {}}}
@@ -117,3 +118,18 @@ hide:
     title: {selector: {text: {}}}
     tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
     media_type: {selector: {select: {options: [tv, movie]}}}
+
+find_episode:
+  name: Find an episode by name
+  description: Look up which season and episode of a show has a given name (from TMDB). Leave the show out to search every show on Trakt for an episode with exactly that title.
+  fields:
+    episode_title: {required: true, example: "The Jordan Boys' Legacy", selector: {text: {}}}
+    title: {description: The show, example: "Lanterns", selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv]}}}
+
+confirm_match:
+  name: Confirm a "probably" viewing
+  description: A viewing labelled "probably" (found by searching Trakt for the episode title) is made certain and, on services Trakt doesn't sync itself, sent to Trakt.
+  fields:
+    id: {required: true, description: The history entry's id, selector: {text: {}}}

@@ -11,6 +11,7 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    find_episode_by_title,
     infer_season,
     parse_episode_label,
     parse_media_sessions,
@@ -419,3 +420,15 @@ def test_room_tracker_works_out_how_far_through_you_got():
     rt = RoomTracker("Bedroom")
     rt.update(Observation("tv_movies", "Netflix"), T0)
     assert rt.update(None, T0 + timedelta(minutes=30))[0]["final_pos_ms"] is None
+
+
+def test_find_episode_by_title():
+    eps = [{"season": 1, "episode": 1, "name": "Pilot"}, {"season": 1, "episode": 2, "name": "The Jordan Boys\u2019 Legacy"},
+           {"season": 2, "episode": 1, "name": "Pilot"}, {"season": 2, "episode": 2, "name": "A Much Longer Episode Name"}]
+    assert [(e["season"], e["episode"]) for e in find_episode_by_title(eps, "the jordan boys' legacy")] == [(1, 2)]
+    assert len(find_episode_by_title(eps, "Pilot")) == 2                       # ambiguous stays ambiguous
+    assert find_episode_by_title(eps, "Pil") == []                             # short: exact only
+    # a longer title that merely contains the episode name is accepted; a short name never matches loosely
+    assert [(e["season"], e["episode"]) for e in find_episode_by_title(eps, "A Much Longer Episode Name (Part 1)")] == [(2, 2)]
+    assert find_episode_by_title(eps, "Pilot: The Beginning") == []
+    assert find_episode_by_title(eps, "") == [] and find_episode_by_title([], "x") == []

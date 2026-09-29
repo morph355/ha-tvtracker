@@ -296,7 +296,9 @@ class Library:
         elif session.get("season") and session.get("episode"):
             self.set_progress(
                 key, session["season"], session["episode"], when,
-                only_forward=True, source="reported",
+                only_forward=True,
+                # a match found by searching Trakt for the episode title is only "probably" right
+                source="found" if session.get("_found") else "reported",
             )
         else:
             nxt = next_episode(item["details"], item.get("progress"))
@@ -334,7 +336,7 @@ class Library:
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
             return
-        guessed = item.get("progress_source") in ("guess", "inferred")
+        guessed = item.get("progress_source") in ("guess", "inferred", "found")
         self.set_progress(
             key, event["season"], event["episode"], when,
             only_forward=not guessed, source="trakt",

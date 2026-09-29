@@ -14,7 +14,7 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .hub import TVTrackerHub
 from .library import item_key
-from .logic import canonical_service, norm_title
+from .logic import canonical_service, find_episode_by_title, norm_title
 from .tmdb import TMDBError
 from .trakt import TraktError
 
@@ -77,6 +77,20 @@ async def _resolve(hub: TVTrackerHub, data: dict[str, Any]) -> dict[str, Any]:
         )
     except TMDBError as err:
         raise HomeAssistantError(str(err)) from err
+
+
+async def _episode_by_title(hub: TVTrackerHub, item: dict[str, Any], title: str) -> dict[str, Any]:
+    """The one episode of a show called `title`, or a helpful error."""
+    try:
+        hits = find_episode_by_title(await hub.episode_names(item), title)
+    except TMDBError as err:
+        raise HomeAssistantError(str(err)) from err
+    if not hits:
+        raise ServiceValidationError(f"No episode of {item['title']} is called '{title}'")
+    if len(hits) > 1:
+        options = "; ".join(f"S{h['season']}E{h['episode']} {h['name']}" for h in hits[:6])
+        raise ServiceValidationError(f"Several episodes match '{title}': {options}. Give season and episode.")
+    return hits[0]
 
 
 def _wrap(func):
@@ -188,6 +202,14 @@ def async_register_services(hass: HomeAssistant) -> None:
         else:
             item = await _resolve(hub, data)
             entry.update(title=item["title"], item_key=item["key"])
+            if (
+                data.get("episode_title")
+                and item["media_type"] == "tv"
+                and not (data.get("season") and data.get("episode"))
+            ):
+                hit = await _episode_by_title(hub, item, data["episode_title"])
+                data = {**data, "season": hit["season"], "episode": hit["episode"]}
+                entry.update(season=hit["season"], episode=hit["episode"], episode_title=hit["name"])
             if data.get("list"):
                 lib.add_to_list(lib.ensure_list(data["list"]), item["key"])
             if item["media_type"] == "movie":
@@ -225,6 +247,31 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub = _hub(hass)
         await hub.async_refresh_all()
         return {"items": len(hub.library.data["items"])}
+
+    async def find_episode(call: ServiceCall):
+        hub = _hub(hass)
+        if not call.data.get("title") and not call.data.get("tmdb_id"):
+            # no show given: ask Trakt which shows have an episode with this title
+            try:
+                matches = await hub.search_trakt_episodes(call.data["episode_title"])
+            except TraktError as err:
+                raise HomeAssistantError(str(err)) from err
+            if hub.trakt is None:
+                raise ServiceValidationError("Searching without a show needs Trakt set up")
+            if not matches:
+                raise ServiceValidationError("No show on Trakt has an episode with exactly that title")
+            return {"matches": matches[:5]}
+        item = await _resolve(hub, call.data)
+        if item["media_type"] != "tv":
+            raise ServiceValidationError(f"{item['title']} is a film, not a series")
+        hit = await _episode_by_title(hub, item, call.data["episode_title"])
+        hub.changed()
+        return {"show": item["title"], "tmdb_id": item["tmdb_id"], **hit,
+                "aired": bool(hit["air_date"] and hit["air_date"] <= _today(hass).isoformat())}
+
+    async def confirm_match(call: ServiceCall):
+        hub = _hub(hass)
+        return await hub.async_confirm_match(call.data["id"])
 
     async def trakt_connect(call: ServiceCall):
         hub = _hub(hass)
@@ -296,12 +343,15 @@ def async_register_services(hass: HomeAssistant) -> None:
             vol.Optional("list"): cv.string,
             vol.Optional("season"): vol.Coerce(int),
             vol.Optional("episode"): vol.Coerce(int),
+            vol.Optional("episode_title"): cv.string,
             vol.Optional("channel"): cv.string,
             vol.Optional("watched_at"): cv.datetime,
             vol.Optional("duration_minutes", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=1440)),
             **TARGET,
         },
     )
+    register("find_episode", find_episode, {vol.Required("episode_title"): cv.string, **TARGET})
+    register("confirm_match", confirm_match, {vol.Required("id"): cv.string})
     register("delete_history", delete_history, {vol.Required("id"): cv.string})
     register("add_service", add_service, {vol.Required("name"): cv.string})
     register("remove_service", remove_service, {vol.Required("name"): cv.string})

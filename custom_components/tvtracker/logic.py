@@ -563,6 +563,51 @@ def parse_trakt_watched_movies(items: list[dict[str, Any]] | None) -> set[int]:
     }
 
 
+def find_episode_by_title(episodes: list[dict[str, Any]], title: str | None) -> list[dict[str, Any]]:
+    """Episodes (each {season, episode, name, ...}) whose name is `title`.
+
+    An exact match (ignoring case, punctuation and curly quotes) wins; only if
+    there is none is a name that contains the title (or the reverse) accepted,
+    and then only for reasonably long names, so "Pilot" never matches loosely.
+    """
+    target = norm(title)
+    if not target:
+        return []
+    exact = [e for e in episodes if norm(e.get("name")) == target]
+    if exact:
+        return exact
+    if len(target) < 8:
+        return []
+    return [
+        e for e in episodes
+        if len(norm(e.get("name"))) >= 8
+        and (norm(e.get("name")) in target or target in norm(e.get("name")))
+    ]
+
+
+# Episode names this short ("Pilot", "Finale") appear in hundreds of shows.
+MIN_EPISODE_SEARCH_CHARS = 8
+
+
+def parse_trakt_episode_search(results: list[dict[str, Any]] | None, title: str) -> list[dict[str, Any]]:
+    """Distinct episodes from a Trakt episode search whose title is exactly `title`
+    (ignoring case, punctuation and curly quotes). Each: show, year, tmdb_id,
+    season, episode, name. Results without a TMDB id for the show are skipped."""
+    target = norm(title)
+    found: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for hit in results or []:
+        ep, show = hit.get("episode") or {}, hit.get("show") or {}
+        tmdb = (show.get("ids") or {}).get("tmdb")
+        if not (tmdb and ep.get("season") and ep.get("number")) or norm(ep.get("title")) != target:
+            continue
+        key = (int(tmdb), int(ep["season"]), int(ep["number"]))
+        found.setdefault(key, {
+            "show": show.get("title"), "year": show.get("year"), "tmdb_id": int(tmdb),
+            "season": int(ep["season"]), "episode": int(ep["number"]), "name": ep.get("title"),
+        })
+    return list(found.values())
+
+
 def analyse_trakt_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
     """Read Trakt's own view of one show (GET /shows/:id/progress/watched).
 

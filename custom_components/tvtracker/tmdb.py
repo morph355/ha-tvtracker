@@ -81,3 +81,16 @@ class TMDB:
             append_to_response="watch/providers",
         )
         return parse_details(media_type, raw), parse_providers(raw, self.region)
+
+    async def season_episodes(self, tmdb_id: int, season: int) -> list[dict[str, Any]]:
+        """The episodes of one season: number, name, air date."""
+        data = await self._get(f"/tv/{int(tmdb_id)}/season/{int(season)}", language="en-GB")
+        return [
+            {
+                "episode": int(e["episode_number"]),
+                "name": e.get("name") or "",
+                "air_date": e.get("air_date") or None,
+            }
+            for e in data.get("episodes") or []
+            if e.get("episode_number")
+        ]

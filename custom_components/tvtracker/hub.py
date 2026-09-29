@@ -32,13 +32,12 @@ from .library import Library, item_key
 from .logic import (
     MEDIA_SESSION_CMD,
     RoomTracker,
+    analyse_trakt_progress,
     build_history_payload,
-    missing_aired_episodes,
     observe,
     parse_media_sessions,
     parse_trakt_history,
     parse_trakt_watched_movies,
-    parse_trakt_watched_shows,
     response_timestamp,
 )
 from .tmdb import TMDB, TMDBError
@@ -525,6 +524,7 @@ class TVTrackerHub:
         if self.trakt is None or self.trakt_status != "connected":
             return {"status": self.trakt_status, "added": 0}
         item = self.library.get_item(key)
+        extra: dict[str, Any] = {}
         try:
             access = await self._trakt_access_token()
             if item["media_type"] == "movie":
@@ -534,18 +534,24 @@ class TVTrackerHub:
                     "watched_at": dt_util.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")}]
                 already = 1 if item["tmdb_id"] in have else 0
             else:
-                try:  # fresh episode counts (a new episode may have aired today)
-                    await self.fetch_item(item["media_type"], item["tmdb_id"])
-                except TMDBError:
-                    pass
-                have = parse_trakt_watched_shows(await self.trakt.watched_shows(access)).get(item["tmdb_id"], {})
-                missing = missing_aired_episodes(item["details"], have)
+                trakt_id = await self.trakt.find_show(access, item["tmdb_id"])
+                if trakt_id is None:
+                    return {"status": "connected", "added": 0,
+                            "error": f"Trakt couldn't find this show (TMDB id {item['tmdb_id']}); nothing was sent"}
+                info = analyse_trakt_progress(await self.trakt.show_progress(access, trakt_id))
                 todo = [
-                    {"media_type": "tv", "tmdb_id": item["tmdb_id"], "season": s,
-                     "episode": e, "watched_at": "released"}
-                    for s, e in missing
+                    {"media_type": "tv", "tmdb_id": item["tmdb_id"], "ids": {"trakt": trakt_id},
+                     "season": s, "episode": e, "watched_at": "released"}
+                    for s, e in info["missing"]
                 ]
-                already = sum(len(v) for v in have.values())
+                already = info["completed"]
+                extra = {
+                    "trakt_aired": info["aired"],
+                    "last_watched_on_trakt": (
+                        f"S{info['last_completed'][0]}E{info['last_completed'][1]}"
+                        if info["last_completed"] else None
+                    ),
+                }
         except TraktAuthError as err:
             self._trakt_lost_login(err)
             return {"status": self.trakt_status, "added": 0, "error": str(err)}
@@ -556,7 +562,12 @@ class TVTrackerHub:
             "status": "connected",
             "already_on_trakt": already,
             "to_add": len(todo),
-            "episodes": [f"S{t['season']}E{t['episode']}" for t in todo][:60] if todo and item["media_type"] == "tv" else [],
+            "episodes": (
+                [f"S{t['season']}E{t['episode']}" for t in todo[:40]]
+                + ([f"... and {len(todo) - 40} more"] if len(todo) > 40 else [])
+                if item["media_type"] == "tv" else []
+            ),
+            **extra,
         }
         if dry_run or not todo:
             result["added"] = 0

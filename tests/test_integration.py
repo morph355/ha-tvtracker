@@ -233,15 +233,15 @@ async def test_dashboard_templates_render(hass, setup, freezer):
     out = {}
     for view in dash["views"]:
         for card in view["cards"]:
-            out[card["title"]] = Template(card["content"], hass).async_render(parse_result=False)
-    assert "**Bedroom** — Severance (Netflix)" in out["Now watching"]
-    assert "**Family Room** — off" in out["Now watching"]
-    assert "**Severance** — up next **S1E4**" in out["Continue watching"]
-    assert "### Shows" in out["Watchlists"] and "### Movies" in out["Watchlists"]
-    assert "Dune" in out["Watchlists"] and "Watch on Netflix" in out["Watchlists"]
-    assert "Severance" in out["Recently watched — TV & movies"] and "S1E3" in out["Recently watched — TV & movies"]
-    assert "Cool video" in out["Recently watched — YouTube"] and "Chan" in out["Recently watched — YouTube"]
-    assert "- Netflix" in out["My streaming services"]
+            out[f"{view['title']} / {card['title']}"] = Template(card["content"], hass).async_render(parse_result=False)
+    assert "**Bedroom** — Severance (Netflix)" in out["Watching / Now watching"]
+    assert "**Family Room** — off" in out["Watching / Now watching"]
+    assert "**Severance** — up next **S1E4**" in out["Watching / Continue watching"]
+    assert "### Shows" in out["Watchlists / Watchlists"] and "### Movies" in out["Watchlists / Watchlists"]
+    assert "Dune" in out["Watchlists / Watchlists"] and "Watch on Netflix" in out["Watchlists / Watchlists"]
+    assert "Severance" in out["TV & Movies / Recently watched"] and "S1E3" in out["TV & Movies / Recently watched"]
+    assert "Cool video" in out["YouTube / Recently watched"] and "Chan" in out["YouTube / Recently watched"]
+    assert "- Netflix" in out["Services / My streaming services"]
     for k, v in out.items():
         print(f"=== {k} ===\n{v}")
 
@@ -358,7 +358,7 @@ def _trakt_ep(id_, tmdb, title, season, number, when):
 def fake_trakt(monkeypatch):
     """Replace the network calls of TraktClient; record what the hub asked for."""
     state = {"polls": ["pending", "ok"], "history": [], "history_calls": [], "refreshed": 0,
-             "history_error": None, "watched_shows": [], "watched_movies": [],
+             "history_error": None, "trakt_show": 777, "show_progress": {}, "watched_movies": [],
              "added": [], "hidden": [], "add_error": None}
 
     async def device_code(self):
@@ -380,8 +380,12 @@ def fake_trakt(monkeypatch):
             raise state["history_error"]
         return list(state["history"])
 
-    async def watched_shows(self, token):
-        return list(state["watched_shows"])
+    async def find_show(self, token, tmdb_id):
+        return state["trakt_show"]
+
+    async def show_progress(self, token, trakt_id):
+        assert trakt_id == state["trakt_show"]
+        return state["show_progress"]
 
     async def watched_movies(self, token):
         return list(state["watched_movies"])
@@ -402,7 +406,7 @@ def fake_trakt(monkeypatch):
         return {}
 
     for name, fn in (("device_code", device_code), ("poll_token", poll_token),
-                     ("refresh", refresh), ("history", history), ("watched_shows", watched_shows),
+                     ("refresh", refresh), ("history", history), ("find_show", find_show), ("show_progress", show_progress),
                      ("watched_movies", watched_movies), ("add_history", add_history),
                      ("hide", hide), ("unhide", unhide)):
         monkeypatch.setattr(f"custom_components.tvtracker.trakt.TraktClient.{name}", fn)
@@ -668,9 +672,15 @@ async def test_partial_viewing_is_not_counted_but_finishing_after_resuming_is(ha
     assert [h["watched_pct"] for h in hub.library.data["history"]] == [33, 89]
 
 
-SEVERANCE_WATCHED = [{"show": {"ids": {"tmdb": 95396}}, "seasons": [
-    {"number": 1, "episodes": [{"number": i} for i in range(1, 10)]},
-    {"number": 2, "episodes": [{"number": i} for i in range(1, 4)]}]}]
+def trakt_progress(seasons):
+    """{season: (episodes_aired_on_trakt, {watched episode numbers})} -> Trakt's progress shape."""
+    return {"seasons": [
+        {"number": n, "episodes": [{"number": e, "completed": e in done} for e in range(1, aired + 1)]}
+        for n, (aired, done) in seasons.items()], "aired": sum(a for a, _ in seasons.values())}
+
+
+# Trakt: S1 all 9 watched, S2 has 12 episodes (TMDB says 10!) and only 1-3 watched
+SEVERANCE_ON_TRAKT = trakt_progress({1: (9, set(range(1, 10))), 2: (12, {1, 2, 3})})
 
 
 async def _connect(hass, hub):
@@ -682,42 +692,61 @@ async def _connect(hass, hub):
 async def test_mark_up_to_date_previews_then_adds_only_the_missing_episodes(hass, setup_trakt, fake_trakt):
     hub = setup_trakt
     await _connect(hass, hub)
-    fake_trakt["watched_shows"] = SEVERANCE_WATCHED
+    fake_trakt["show_progress"] = SEVERANCE_ON_TRAKT
     await call(hass, "add_to_list", list="Shows", title="Severance")
 
-    # 1. preview: reports the plan, changes nothing anywhere
+    # 1. preview: says what Trakt holds and what would be added; changes nothing anywhere
     res = await call(hass, "mark_watched", title="Severance", dry_run=True)
     assert res["dry_run"] is True
-    assert res["trakt"]["to_add"] == 7 and res["trakt"]["already_on_trakt"] == 12
-    assert res["trakt"]["episodes"] == [f"S2E{n}" for n in range(4, 11)]
+    t = res["trakt"]
+    assert (t["already_on_trakt"], t["trakt_aired"], t["last_watched_on_trakt"]) == (12, 21, "S2E3")
+    # Trakt's numbering (12 episodes in S2), not TMDB's (10): 9 missing, S2E4..S2E12
+    assert t["to_add"] == 9 and t["episodes"] == [f"S2E{n}" for n in range(4, 13)]
     assert fake_trakt["added"] == []
     assert hub.library.data["items"]["tv:95396"]["progress"] is None
 
-    # 2. for real: HA is up to date, and Trakt gets exactly the 7 missing, dated to their air dates
+    # 2. for real: HA is up to date (TMDB's view), Trakt gets exactly what *it* is missing, pinned by its own show id
     res = await call(hass, "mark_watched", title="Severance")
     assert res["item"]["status"] == "caught_up" and res["item"]["progress"] == "S2E10"
-    assert res["trakt"]["added"] == 7 and res["trakt"]["still_queued"] == 0
+    assert res["trakt"]["added"] == 9 and res["trakt"]["still_queued"] == 0
     (payload,) = fake_trakt["added"]
-    assert payload == {"shows": [{"ids": {"tmdb": 95396}, "seasons": [{"number": 2, "episodes": [
-        {"number": n, "watched_at": "released"} for n in range(4, 11)]}]}]}
+    assert payload == {"shows": [{"ids": {"trakt": 777}, "seasons": [{"number": 2, "episodes": [
+        {"number": n, "watched_at": "released"} for n in range(4, 13)]}]}]}
 
     # 3. un-marking changes HA only: nothing is ever removed from Trakt
     res = await call(hass, "mark_watched", title="Severance", watched=False)
     assert res["trakt"]["status"] == "unchanged" and len(fake_trakt["added"]) == 1
 
 
+async def test_nothing_is_written_if_trakt_cannot_find_the_show_or_already_has_everything(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+
+    fake_trakt["trakt_show"] = None                                     # Trakt doesn't know the show
+    res = await call(hass, "mark_watched", title="Severance")
+    assert res["item"]["progress"] == "S2E10"                             # HA still updated
+    assert "couldn't find" in res["trakt"]["error"] and res["trakt"]["added"] == 0
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+
+    fake_trakt["trakt_show"] = 777                                      # Trakt has every episode
+    fake_trakt["show_progress"] = trakt_progress({1: (9, set(range(1, 10))), 2: (10, set(range(1, 11)))})
+    res = await call(hass, "mark_watched", title="Severance")
+    assert res["trakt"]["to_add"] == 0 and res["trakt"]["added"] == 0 and fake_trakt["added"] == []
+
+
 async def test_a_failed_send_stays_queued_and_is_retried_by_the_next_sync(hass, setup_trakt, fake_trakt):
     from custom_components.tvtracker.trakt import TraktError
     hub = setup_trakt
     await _connect(hass, hub)
-    fake_trakt["watched_shows"] = SEVERANCE_WATCHED
+    fake_trakt["show_progress"] = SEVERANCE_ON_TRAKT
     await call(hass, "add_to_list", list="Shows", title="Severance")
 
     fake_trakt["add_error"] = TraktError("Trakt is down")
     res = await call(hass, "mark_watched", title="Severance")
     assert res["item"]["progress"] == "S2E10"                       # HA is still updated
-    assert res["trakt"]["added"] == 0 and res["trakt"]["still_queued"] == 7 and "down" in res["trakt"]["error"]
-    assert hass.states.get("sensor.tv_tracker_trakt").attributes["waiting_to_send"] == 7
+    assert res["trakt"]["added"] == 0 and res["trakt"]["still_queued"] == 9 and "down" in res["trakt"]["error"]
+    assert hass.states.get("sensor.tv_tracker_trakt").attributes["waiting_to_send"] == 9
 
     fake_trakt["add_error"] = None
     await call(hass, "trakt_sync")                                  # the hourly sync flushes the queue

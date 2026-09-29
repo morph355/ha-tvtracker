@@ -1,0 +1,325 @@
+"""The watchlist library: lists, items, progress, history (pure, no HA imports)."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import date, datetime
+from typing import Any
+
+from .const import DEFAULT_SERVICES, HISTORY_LIMIT
+from .logic import (
+    availability,
+    canonical_service,
+    derive_status,
+    match_score,
+    next_episode,
+    norm_title,
+)
+
+
+def item_key(media_type: str, tmdb_id: int) -> str:
+    return f"{media_type}:{int(tmdb_id)}"
+
+
+def _iso(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+def fmt_episode(progress: dict[str, int] | tuple[int, int] | None) -> str | None:
+    if not progress:
+        return None
+    if isinstance(progress, tuple):
+        return f"S{progress[0]}E{progress[1]}"
+    return f"S{progress['season']}E{progress['episode']}"
+
+
+class Library:
+    """All persisted state. `data` is JSON-serialisable."""
+
+    def __init__(self, data: dict[str, Any] | None = None) -> None:
+        self.data: dict[str, Any] = data or {}
+        self.data.setdefault("lists", {})
+        self.data.setdefault("items", {})
+        self.data.setdefault("history", [])
+        self.data.setdefault("services", list(DEFAULT_SERVICES))
+
+    # ---- lists -----------------------------------------------------------
+    def resolve_list(self, ref: str) -> str:
+        """Find a list by id or (case-insensitive) name."""
+        lists = self.data["lists"]
+        if ref in lists:
+            return ref
+        for list_id, lst in lists.items():
+            if lst["name"].strip().lower() == ref.strip().lower():
+                return list_id
+        raise ValueError(f"No watchlist called '{ref}'")
+
+    def create_list(self, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("A watchlist needs a name")
+        try:
+            self.resolve_list(name)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"A watchlist called '{name}' already exists")
+        base = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "list"
+        list_id, n = base, 2
+        while list_id in self.data["lists"]:
+            list_id, n = f"{base}_{n}", n + 1
+        self.data["lists"][list_id] = {"name": name}
+        return list_id
+
+    def ensure_list(self, name: str) -> str:
+        try:
+            return self.resolve_list(name)
+        except ValueError:
+            return self.create_list(name)
+
+    def delete_list(self, ref: str) -> str:
+        list_id = self.resolve_list(ref)
+        name = self.data["lists"].pop(list_id)["name"]
+        for item in self.data["items"].values():
+            if list_id in item["lists"]:
+                item["lists"].remove(list_id)
+        return name
+
+    # ---- items -----------------------------------------------------------
+    def upsert_item(
+        self,
+        media_type: str,
+        tmdb_id: int,
+        details: dict[str, Any],
+        providers: dict[str, list[str]] | None = None,
+        now: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        key = item_key(media_type, tmdb_id)
+        item = self.data["items"].get(key)
+        if item is None:
+            item = {
+                "key": key,
+                "tmdb_id": int(tmdb_id),
+                "media_type": media_type,
+                "title": details.get("title"),
+                "year": details.get("year"),
+                "lists": [],
+                "progress": None,
+                "watched": False,
+                "last_watched": None,
+                "added": _iso(now),
+                "details": {},
+                "providers": {},
+            }
+            self.data["items"][key] = item
+        item["title"] = details.get("title") or item["title"]
+        item["year"] = details.get("year") or item["year"]
+        item["details"] = details
+        if providers is not None:
+            item["providers"] = providers
+        item["refreshed"] = _iso(now)
+        return item
+
+    def get_item(self, key: str) -> dict[str, Any]:
+        try:
+            return self.data["items"][key]
+        except KeyError:
+            raise ValueError(f"Unknown item {key}") from None
+
+    def find_by_title(self, title: str, media_type: str | None = None) -> list[str]:
+        target = norm_title(title)
+        return [
+            k
+            for k, it in self.data["items"].items()
+            if norm_title(it["title"]) == target
+            and (media_type is None or it["media_type"] == media_type)
+        ]
+
+    def add_to_list(self, list_ref: str, key: str) -> str:
+        list_id = self.resolve_list(list_ref)
+        item = self.get_item(key)
+        if list_id not in item["lists"]:
+            item["lists"].append(list_id)
+        return list_id
+
+    def remove_from_list(self, list_ref: str, key: str) -> None:
+        list_id = self.resolve_list(list_ref)
+        item = self.get_item(key)
+        if list_id in item["lists"]:
+            item["lists"].remove(list_id)
+
+    def set_progress(
+        self,
+        key: str,
+        season: int,
+        episode: int,
+        when: datetime | str | None = None,
+        only_forward: bool = False,
+    ) -> bool:
+        """Record 'watched up to S<season>E<episode>'. Returns True if changed."""
+        from .logic import episode_index  # local: keeps import list short
+
+        item = self.get_item(key)
+        if item["media_type"] != "tv":
+            raise ValueError(f"{item['title']} is a movie; use mark_watched")
+        current = item.get("progress")
+        if only_forward and current:
+            seasons = {int(k): int(v) for k, v in (item["details"].get("seasons") or {}).items()}
+            if episode_index(seasons, season, episode) <= episode_index(
+                seasons, current["season"], current["episode"]
+            ):
+                item["last_watched"] = _iso(when) or item.get("last_watched")
+                return False
+        item["progress"] = {"season": int(season), "episode": int(episode)}
+        item["watched"] = False
+        item["last_watched"] = _iso(when) or item.get("last_watched")
+        return True
+
+    def mark_watched(
+        self, key: str, watched: bool = True, when: datetime | str | None = None
+    ) -> None:
+        """Movie: watched. TV: watched everything that has aired."""
+        item = self.get_item(key)
+        item["watched"] = watched
+        if watched:
+            item["last_watched"] = _iso(when) or item.get("last_watched")
+            last = (item["details"] or {}).get("last_aired")
+            if item["media_type"] == "tv" and last:
+                item["progress"] = {"season": last["season"], "episode": last["episode"]}
+        elif item["media_type"] == "movie":
+            item["last_watched"] = None
+
+    # ---- services --------------------------------------------------------
+    def add_service(self, name: str) -> bool:
+        name = canonical_service(name)
+        if name and name not in self.data["services"]:
+            self.data["services"].append(name)
+            return True
+        return False
+
+    def remove_service(self, name: str) -> bool:
+        name = canonical_service(name)
+        if name in self.data["services"]:
+            self.data["services"].remove(name)
+            return True
+        return False
+
+    # ---- history ---------------------------------------------------------
+    def add_history(self, entry: dict[str, Any]) -> dict[str, Any]:
+        entry = {**entry, "id": uuid.uuid4().hex[:8]}
+        for field in ("start", "end"):
+            entry[field] = _iso(entry.get(field))
+        history = self.data["history"]
+        history.append(entry)
+        history.sort(key=lambda h: h.get("start") or "")
+        del history[:-HISTORY_LIMIT]
+        return entry
+
+    def delete_history(self, entry_id: str) -> bool:
+        before = len(self.data["history"])
+        self.data["history"] = [h for h in self.data["history"] if h["id"] != entry_id]
+        return len(self.data["history"]) != before
+
+    # ---- live sessions ---------------------------------------------------
+    def match_session(self, session: dict[str, Any]) -> str | None:
+        """Which watchlist item does a playback session belong to?"""
+        if session.get("category") != "tv_movies":
+            return None
+        title, series = session.get("title"), session.get("series_title")
+        matches = [
+            k
+            for k, it in self.data["items"].items()
+            if match_score(it["title"], series, title)
+        ]
+        if not matches:
+            return None
+        # Prefer items that are on a list; if the player reported a series
+        # title it's a TV show.
+        matches.sort(
+            key=lambda k: (
+                not self.data["items"][k]["lists"],
+                series is not None and self.data["items"][k]["media_type"] != "tv",
+            )
+        )
+        return matches[0]
+
+    def apply_session(
+        self, session: dict[str, Any], min_count_seconds: int
+    ) -> str | None:
+        """Update watchlist progress from a finished session; returns item key."""
+        key = self.match_session(session)
+        if key is None:
+            return None
+        seconds = (session["end"] - session["start"]).total_seconds()
+        if seconds < min_count_seconds:
+            return key
+        item = self.data["items"][key]
+        when = session["end"]
+        if item["media_type"] == "movie":
+            self.mark_watched(key, True, when)
+        elif session.get("season") and session.get("episode"):
+            self.set_progress(key, session["season"], session["episode"], when, only_forward=True)
+        else:
+            nxt = next_episode(item["details"], item.get("progress"))
+            if nxt:
+                self.set_progress(key, nxt[0], nxt[1], when)
+        return key
+
+    # ---- views -----------------------------------------------------------
+    def view(self, key: str, today: date) -> dict[str, Any]:
+        item = self.data["items"][key]
+        status = derive_status(item, today)
+        avail = availability(item, self.data["services"], today)
+        nxt = None
+        if item["media_type"] == "tv" and status in ("watching", "want_to_watch"):
+            nxt = next_episode(item["details"], item.get("progress"))
+        details = item.get("details") or {}
+        return {
+            "key": key,
+            "title": item["title"],
+            "type": item["media_type"],
+            "year": item.get("year"),
+            "status": status,
+            "progress": fmt_episode(item.get("progress")),
+            "next": fmt_episode(nxt),
+            "next_air_date": details.get("next_air_date"),
+            "availability": avail["text"],
+            "on_my_services": avail["on_my_services"],
+            "poster": details.get("poster"),
+            "lists": [self.data["lists"][i]["name"] for i in item["lists"] if i in self.data["lists"]],
+            "last_watched": item.get("last_watched"),
+        }
+
+    def watchlists(self, today: date) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {
+            lst["name"]: [] for lst in self.data["lists"].values()
+        }
+        for key, item in self.data["items"].items():
+            for list_id in item["lists"]:
+                if list_id in self.data["lists"]:
+                    out[self.data["lists"][list_id]["name"]].append(self.view(key, today))
+        order = {"watching": 0, "caught_up": 1, "want_to_watch": 2, "upcoming": 3, "finished": 4}
+        for views in out.values():
+            views.sort(key=lambda v: (order.get(v["status"], 9), v["title"].lower()))
+        return out
+
+    def continue_watching(self, today: date) -> list[dict[str, Any]]:
+        views = [self.view(k, today) for k in self.data["items"]]
+        started = [v for v in views if v["status"] in ("watching", "caught_up")]
+        # Most recently watched first, then "watching" ahead of "caught up".
+        started.sort(key=lambda v: v["last_watched"] or "", reverse=True)
+        started.sort(key=lambda v: v["status"] != "watching")
+        return started
+
+    def recent_history(self, category: str | None, limit: int = 15) -> list[dict[str, Any]]:
+        rows = [
+            h
+            for h in reversed(self.data["history"])
+            if category is None
+            or (category == "youtube") == (h.get("category") == "youtube")
+        ]
+        return rows[:limit]
+

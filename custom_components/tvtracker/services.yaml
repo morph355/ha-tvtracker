@@ -1,0 +1,95 @@
+search:
+  name: Search TMDB
+  description: Find a TV show or movie. Returns candidates with tmdb_id to use in other services.
+  fields:
+    query: {required: true, example: "Severance", selector: {text: {}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+
+create_list:
+  name: Create watchlist
+  fields:
+    name: {required: true, example: "Family Movie Night", selector: {text: {}}}
+
+delete_list:
+  name: Delete watchlist
+  description: Deletes the list only; shows keep their progress.
+  fields:
+    list: {required: true, selector: {text: {}}}
+
+add_to_list:
+  name: Add to watchlist
+  description: Add a show or movie (by title, or tmdb_id + media_type). The list is created if it doesn't exist.
+  fields:
+    list: {required: true, example: "Shows", selector: {text: {}}}
+    title: {example: "Severance", selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+    year: {selector: {number: {min: 1900, max: 2100, mode: box}}}
+
+remove_from_list:
+  name: Remove from watchlist
+  fields:
+    list: {required: true, selector: {text: {}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+
+set_progress:
+  name: Set watch progress
+  description: "Record that you have watched up to (and including) a season and episode."
+  fields:
+    season: {required: true, selector: {number: {min: 1, max: 100, mode: box}}}
+    episode: {required: true, selector: {number: {min: 1, max: 1000, mode: box}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+
+mark_watched:
+  name: Mark watched
+  description: Mark a movie as watched, or a show as fully watched (everything aired so far).
+  fields:
+    watched: {default: true, selector: {boolean: {}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+
+log_watch:
+  name: Log a viewing
+  description: Add a viewing the TVs didn't capture. Updates watch progress for shows and movies.
+  fields:
+    category: {default: tv_movies, selector: {select: {options: [tv_movies, youtube]}}}
+    title: {example: "Severance", selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+    year: {selector: {number: {min: 1900, max: 2100, mode: box}}}
+    season: {selector: {number: {min: 1, max: 100, mode: box}}}
+    episode: {selector: {number: {min: 1, max: 1000, mode: box}}}
+    service: {example: "Apple TV", selector: {text: {}}}
+    room: {example: "Bedroom", selector: {text: {}}}
+    channel: {description: YouTube channel, selector: {text: {}}}
+    list: {description: Also add to this watchlist, selector: {text: {}}}
+    watched_at: {selector: {datetime: {}}}
+    duration_minutes: {default: 0, selector: {number: {min: 0, max: 1440, mode: box}}}
+
+delete_history:
+  name: Delete a history entry
+  fields:
+    id: {required: true, selector: {text: {}}}
+
+add_service:
+  name: Add streaming service
+  fields:
+    name: {required: true, example: "Paramount+", selector: {text: {}}}
+
+remove_service:
+  name: Remove streaming service
+  fields:
+    name: {required: true, selector: {text: {}}}
+
+refresh:
+  name: Refresh availability
+  description: Re-check TMDB for every tracked title now (otherwise done every 12 hours).
+
+get_library:
+  name: Get library
+  description: Return all watchlists, in-progress shows, services and recent history.

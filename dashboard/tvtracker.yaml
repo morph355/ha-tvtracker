@@ -1,0 +1,84 @@
+# TV Tracker dashboard.
+# Add via: Settings > Dashboards > Add dashboard > (open it) > ⋮ > Raw configuration editor,
+# then paste this file's contents.
+# The room names below must match your rooms in the TV Tracker options.
+title: TV Tracker
+views:
+  - title: Watching
+    path: watching
+    icon: mdi:television-play
+    cards:
+      - type: markdown
+        title: Now watching
+        content: |-
+          {% for room in ['Family Room', 'Bedroom', 'Living Room'] -%}
+          {% set e = 'sensor.tv_tracker_now_watching_' ~ (room | lower | replace(' ', '_')) -%}
+          {% if states(e) in ['Idle', 'unknown', 'unavailable'] -%}
+          **{{ room }}** — off
+          {% else -%}
+          **{{ room }}** — {{ states(e) }} ({{ state_attr(e, 'service') }}{% if state_attr(e, 'channel') %}, {{ state_attr(e, 'channel') }}{% endif %})
+          {% endif %}
+          {% endfor %}
+
+      - type: markdown
+        title: Continue watching
+        content: |-
+          {% set rows = state_attr('sensor.tv_tracker_continue_watching', 'items') or [] -%}
+          {% if rows | length == 0 -%}
+          Nothing in progress.
+          {% endif -%}
+          {% for v in rows -%}
+          {% if v.status == 'watching' -%}
+          - **{{ v.title }}** — up next **{{ v.next }}** · {{ v.availability }}
+          {% else -%}
+          - **{{ v.title }}** — caught up{% if v.next_air_date %}, next episode {{ v.next_air_date }}{% endif %}
+          {% endif -%}
+          {% endfor %}
+
+  - title: Watchlists
+    path: watchlists
+    icon: mdi:playlist-play
+    cards:
+      - type: markdown
+        title: Watchlists
+        content: |-
+          {% set lists = state_attr('sensor.tv_tracker_watchlists', 'lists') or {} -%}
+          {% if lists | length == 0 -%}
+          No watchlists yet. Ask Claude to create one, or call `tvtracker.create_list`.
+          {% endif -%}
+          {% for name, items in lists.items() -%}
+          ### {{ name }}
+          {% for v in items -%}
+          - **{{ v.title }}** ({{ 'TV' if v.type == 'tv' else 'Movie' }}{% if v.year %}, {{ v.year }}{% endif %}) — {{ v.status | replace('_', ' ') }}{% if v.progress and v.status != 'finished' %}, at {{ v.progress }}{% endif %}{% if v.next and v.status == 'want_to_watch' %}, start {{ v.next }}{% endif %} — {{ v.availability }}
+          {% endfor %}
+
+          {% endfor %}
+
+  - title: History
+    path: history
+    icon: mdi:history
+    cards:
+      - type: markdown
+        title: Recently watched — TV & movies
+        content: |-
+          {% for h in state_attr('sensor.tv_tracker_history', 'tv_movies') or [] -%}
+          - **{{ h.title or 'Unknown' }}**{% if h.season %} S{{ h.season }}E{{ h.episode }}{% endif %} — {{ h.service or '?' }}{% if h.room %}, {{ h.room }}{% endif %} · {{ as_timestamp(h.start) | timestamp_custom('%a %d %b %H:%M') }}
+          {% endfor %}
+
+      - type: markdown
+        title: Recently watched — YouTube
+        content: |-
+          {% for h in state_attr('sensor.tv_tracker_history', 'youtube') or [] -%}
+          - **{{ h.title or 'Unknown video' }}**{% if h.channel %} — {{ h.channel }}{% endif %}{% if h.room %} ({{ h.room }}){% endif %} · {{ as_timestamp(h.start) | timestamp_custom('%a %d %b %H:%M') }}
+          {% endfor %}
+
+  - title: Services
+    path: services
+    icon: mdi:play-network
+    cards:
+      - type: markdown
+        title: My streaming services
+        content: |-
+          {% for s in state_attr('sensor.tv_tracker_services', 'services') or [] -%}
+          - {{ s }}
+          {% endfor %}

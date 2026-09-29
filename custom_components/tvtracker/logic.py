@@ -563,6 +563,28 @@ def parse_trakt_watched_movies(items: list[dict[str, Any]] | None) -> set[int]:
     }
 
 
+def find_episode_by_title(episodes: list[dict[str, Any]], title: str | None) -> list[dict[str, Any]]:
+    """Episodes (each {season, episode, name, ...}) whose name is `title`.
+
+    An exact match (ignoring case, punctuation and curly quotes) wins; only if
+    there is none is a name that contains the title (or the reverse) accepted,
+    and then only for reasonably long names, so "Pilot" never matches loosely.
+    """
+    target = norm(title)
+    if not target:
+        return []
+    exact = [e for e in episodes if norm(e.get("name")) == target]
+    if exact:
+        return exact
+    if len(target) < 8:
+        return []
+    return [
+        e for e in episodes
+        if len(norm(e.get("name"))) >= 8
+        and (norm(e.get("name")) in target or target in norm(e.get("name")))
+    ]
+
+
 def analyse_trakt_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
     """Read Trakt's own view of one show (GET /shows/:id/progress/watched).
 

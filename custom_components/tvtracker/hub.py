@@ -34,6 +34,7 @@ from .logic import (
     RoomTracker,
     analyse_trakt_progress,
     build_history_payload,
+    find_episode_by_title,
     observe,
     parse_media_sessions,
     parse_trakt_history,
@@ -153,7 +154,65 @@ class TVTrackerHub:
         )
         for session in closed:
             self._record(session)
+        self._maybe_resolve_episode(room)
         self.changed()
+
+    def _maybe_resolve_episode(self, room: str) -> None:
+        """A TV programme whose title matches no show may be an *episode name*
+        (Now TV sends "The Jordan Boys' Legacy"): look it up among tracked shows."""
+        cur = self.trackers[room].current
+        if (
+            cur is None
+            or cur["category"] != "tv_movies"
+            or not cur.get("title")
+            or cur.get("_episode_lookup")
+            or cur.get("season")
+            or self.library.match_session(cur) is not None
+        ):
+            return
+        cur["_episode_lookup"] = cur["title"]
+        self.hass.async_create_task(self._resolve_live_episode(cur))
+
+    async def _resolve_live_episode(self, session: dict[str, Any]) -> None:
+        title = session["title"]
+        try:
+            for key, item in list(self.library.data["items"].items()):
+                if item["media_type"] != "tv" or not (item["lists"] or item.get("progress")):
+                    continue
+                details = item.get("details") or {}
+                last = (details.get("last_aired") or {}).get("season")
+                wanted = {s for s in (last, (last or 0) - 1, (item.get("progress") or {}).get("season")) if s}
+                episodes = await self.episode_names(item, wanted)
+                hits = find_episode_by_title(episodes, title)
+                if len(hits) == 1:
+                    hit = hits[0]
+                    session.update(
+                        series_title=item["title"], season=hit["season"], episode=hit["episode"],
+                        subtitle=hit["name"],
+                    )
+                    _LOGGER.info("Recognised %s as %s S%sE%s", title, item["title"], hit["season"], hit["episode"])
+                    self.changed()
+                    return
+        except TMDBError as err:
+            _LOGGER.debug("Episode lookup for %s failed: %s", title, err)
+
+    async def episode_names(self, item: dict[str, Any], seasons: Any = None) -> list[dict[str, Any]]:
+        """Episode names for a show, fetched from TMDB and cached on the item.
+
+        `seasons`: which seasons (default all). The latest aired season is always
+        refreshed, since new episodes appear there.
+        """
+        details = item.get("details") or {}
+        available = sorted(int(s) for s in (details.get("seasons") or {}))
+        wanted = sorted(set(available) & {int(s) for s in (seasons if seasons is not None else available)})
+        latest = (details.get("last_aired") or {}).get("season")
+        cache = item.setdefault("episodes", {})
+        out: list[dict[str, Any]] = []
+        for season in wanted:
+            if str(season) not in cache or season >= (latest or 0):
+                cache[str(season)] = await self.tmdb.season_episodes(item["tmdb_id"], season)
+            out.extend({**e, "season": season} for e in cache[str(season)])
+        return out
 
     # ---- ADB media-session polling --------------------------------------
     def _adb_entity(self, room: str) -> str | None:

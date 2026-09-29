@@ -1,6 +1,7 @@
 """End-to-end test against a real Home Assistant core with TMDB faked."""
 
 import asyncio
+import re
 from datetime import timedelta
 
 import pytest
@@ -16,6 +17,16 @@ RAW_GHOSTS = {
     "last_episode_to_air": {"season_number": 1, "episode_number": 20, "runtime": 30},
     "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "BBC iPlayer"}]}}},
 }
+
+RAW_LANTERNS = {
+    "name": "Lanterns", "first_air_date": "2026-08-01", "status": "Returning Series", "episode_run_time": [45],
+    "seasons": [{"season_number": 1, "episode_count": 8}],
+    "last_episode_to_air": {"season_number": 1, "episode_number": 3, "runtime": 45},
+    "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "NOW"}]}}},
+}
+# Season 1 of Lanterns (names are made up for the test; #3 uses a curly apostrophe like Now TV's title)
+LANTERNS_S1 = [(1, "Day Into Night", "2026-08-01"), (2, "Sunset Ridge", "2026-08-08"),
+               (3, "The Jordan Boys’ Legacy", "2026-08-15"), (4, "Yet To Air", "2027-01-01")]
 
 RAW_WREXHAM = {
     "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "status": "Returning Series",
@@ -41,7 +52,8 @@ def fake_tmdb(monkeypatch):
             q = params["query"].lower()
             hits = [{"id": 95396, "name": "Severance", "first_air_date": "2022-02-18", "popularity": 9},
                     {"id": 1234, "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "popularity": 8},
-                    {"id": 4242, "name": "Ghosts", "first_air_date": "2021-10-07", "popularity": 7}]
+                    {"id": 4242, "name": "Ghosts", "first_air_date": "2021-10-07", "popularity": 7},
+                    {"id": 95350, "name": "Lanterns", "first_air_date": "2026-08-01", "popularity": 9}]
             return {"results": [h for h in hits if q in h["name"].lower()]}
         if path == "/search/movie":
             return {"results": [{"id": 438631, "title": "Dune", "release_date": "2021-10-01", "popularity": 5}]
@@ -52,6 +64,14 @@ def fake_tmdb(monkeypatch):
             return {**RAW_WREXHAM}
         if path == "/tv/4242":
             return {**RAW_GHOSTS}
+        if path == "/tv/95350":
+            return {**RAW_LANTERNS}
+        if path == "/tv/95350/season/1":
+            return {"episodes": [{"episode_number": n, "name": name, "air_date": d} for n, name, d in LANTERNS_S1]}
+        if re.fullmatch(r"/tv/\d+/season/\d+", path):   # any other show: episodes with dull names
+            season = int(path.rsplit("/", 1)[1])
+            return {"episodes": [{"episode_number": n, "name": f"Episode {season}.{n}", "air_date": "2020-01-01"}
+                                 for n in range(1, 4)]}
         if path == "/movie/438631":
             return {"title": "Dune", "release_date": "2021-10-01", "runtime": 155,
                     "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "Netflix"}]}}}}
@@ -885,3 +905,73 @@ async def test_nothing_is_sent_when_trakt_is_not_connected(hass, setup, fake_tmd
     hub = hass.data[DOMAIN][setup.entry_id]
     assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 18}
     assert hub.library.data.get("trakt_outbox", []) == []
+
+
+
+async def test_find_an_episode_by_its_name(hass, setup):
+    res = await call(hass, "find_episode", title="Lanterns", episode_title="The Jordan Boys' Legacy")
+    assert (res["show"], res["season"], res["episode"], res["aired"]) == ("Lanterns", 1, 3, True)
+    assert res["name"] == "The Jordan Boys\u2019 Legacy"        # curly and straight apostrophes match
+    res = await call(hass, "find_episode", tmdb_id=95350, media_type="tv", episode_title="yet to air")
+    assert (res["episode"], res["aired"]) == (4, False)         # found, but hasn't aired
+    with pytest.raises(ServiceValidationError):
+        await call(hass, "find_episode", title="Lanterns", episode_title="No Such Episode")
+    with pytest.raises(ServiceValidationError):                 # a film has no episodes
+        await call(hass, "find_episode", title="Dune", episode_title="anything")
+
+
+async def test_log_watch_can_use_the_episode_name(hass, setup):
+    res = await call(hass, "log_watch", title="Lanterns", episode_title="Sunset Ridge", service="Now TV")
+    assert res["item"]["progress"] == "S1E2"
+    hist = (await call(hass, "get_library"))["recent_history"][0]
+    assert (hist["season"], hist["episode"], hist["episode_title"]) == (1, 2, "Sunset Ridge")
+
+
+async def test_a_now_tv_episode_title_is_recognised_as_a_tracked_show_and_sent_to_trakt(hass, setup_trakt, fake_trakt, freezer):
+    """What happened on the real Bedroom TV: Now TV sent only 'The Jordan Boys’ Legacy'."""
+    from homeassistant.util import dt as dt_util
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Lanterns")
+    room = "media_player.master_room_tv"
+
+    hass.states.async_set(room, "playing", {
+        "app_id": "AndroidNativeApp", "app_name": "NOW", "media_title": "The Jordan Boys\u2019 Legacy",
+        "media_duration": 2725.0, "media_position": 31.4,
+        "media_position_updated_at": dt_util.utcnow().isoformat()})
+    await hass.async_block_till_done()
+    now = hass.states.get("sensor.tv_tracker_now_watching_bedroom")
+    assert now.state == "Lanterns"                                   # recognised while it is playing
+    freezer.tick(timedelta(minutes=40))
+    hass.states.async_set(room, "off", {})
+    await hass.async_block_till_done()
+
+    item = hub.library.data["items"]["tv:95350"]
+    assert item["progress"] == {"season": 1, "episode": 3} and item["progress_source"] == "reported"
+    assert hub.library.data["history"][-1]["episode_title"] == "The Jordan Boys\u2019 Legacy"
+    (payload,) = fake_trakt["added"]                                 # Now TV is one Trakt does not sync
+    assert payload["shows"][0]["seasons"][0]["episodes"][0]["number"] == 3
+
+
+async def test_an_unrecognised_title_is_left_alone_and_lookups_are_not_repeated(hass, setup, freezer):
+    from homeassistant.util import dt as dt_util
+    await call(hass, "add_to_list", list="Shows", title="Lanterns")
+    hub = hass.data[DOMAIN][setup.entry_id]
+    room = "media_player.master_room_tv"
+    lookups = []
+    orig = hub.tmdb.season_episodes
+
+    async def counting(tmdb_id, season):
+        lookups.append((tmdb_id, season))
+        return await orig(tmdb_id, season)
+
+    hub.tmdb.season_episodes = counting
+    for _ in range(3):   # the same programme reported again and again
+        hass.states.async_set(room, "playing", {
+            "app_id": "AndroidNativeApp", "app_name": "NOW", "media_title": "A Film Nobody Tracks",
+            "media_duration": 5000.0, "media_position": 1.0,
+            "media_position_updated_at": dt_util.utcnow().isoformat()})
+        await hass.async_block_till_done()
+    assert hass.states.get("sensor.tv_tracker_now_watching_bedroom").state == "A Film Nobody Tracks"
+    assert len(lookups) == 1                                        # looked up once, not on every update
+    assert hub.library.data["items"]["tv:95350"]["progress"] is None

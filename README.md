@@ -52,6 +52,8 @@ What it does once connected (`sensor.tv_tracker_trakt` shows `connected`):
 
 **Not instant.** Trakt's streaming sync runs about once a day, and some services give only a date, so Trakt updates arrive later than the viewing. The TVs still record the service, room and time straight away. BBC iPlayer, ITVX, Channel 4 and Now TV are not among Trakt's supported services.
 
+If it says `connected` but imports nothing, `sensor.tv_tracker_trakt` has a `last_result` attribute (and `tvtracker.trakt_sync` returns the same numbers): `fetched` is how many watches Trakt sent, `without_tmdb_id` how many we couldn't use, `already_applied` how many an earlier sync handled. `fetched: 0` means Trakt has no history in that window yet.
+
 Remove it any time with `tvtracker.trakt_disconnect`.
 
 ## Using it

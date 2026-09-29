@@ -16,6 +16,7 @@ from .hub import TVTrackerHub
 from .library import item_key
 from .logic import canonical_service, norm_title
 from .tmdb import TMDBError
+from .trakt import TraktError
 
 MEDIA_TYPE = vol.In(["tv", "movie"])
 
@@ -204,6 +205,22 @@ def async_register_services(hass: HomeAssistant) -> None:
         await hub.async_refresh_all()
         return {"items": len(hub.library.data["items"])}
 
+    async def trakt_connect(call: ServiceCall):
+        hub = _hub(hass)
+        try:
+            return await hub.async_trakt_connect()
+        except TraktError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    async def trakt_sync(call: ServiceCall):
+        hub = _hub(hass)
+        return await hub.async_trakt_sync()
+
+    async def trakt_disconnect(call: ServiceCall):
+        hub = _hub(hass)
+        await hub.async_trakt_disconnect()
+        return {"status": hub.trakt_status}
+
     async def get_library(call: ServiceCall):
         hub = _hub(hass)
         lib, today = hub.library, _today(hass)
@@ -250,4 +267,7 @@ def async_register_services(hass: HomeAssistant) -> None:
     register("add_service", add_service, {vol.Required("name"): cv.string})
     register("remove_service", remove_service, {vol.Required("name"): cv.string})
     register("refresh", refresh, {})
+    register("trakt_connect", trakt_connect, {})
+    register("trakt_sync", trakt_sync, {})
+    register("trakt_disconnect", trakt_disconnect, {})
     register("get_library", get_library, {})

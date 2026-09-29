@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
@@ -13,16 +15,28 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ADB_POLL_SECONDS,
     MIN_COUNT_SECONDS,
     MIN_SESSION_SECONDS,
     REFRESH_INTERVAL_HOURS,
     SIGNAL_UPDATE,
     STORAGE_KEY,
     STORAGE_VERSION,
+    TRAKT_INITIAL_DAYS,
+    TRAKT_SYNC_HOURS,
+    TRAKT_SYNC_OVERLAP_DAYS,
 )
-from .library import Library
-from .logic import RoomTracker, observe
+from .library import Library, item_key
+from .logic import (
+    MEDIA_SESSION_CMD,
+    RoomTracker,
+    observe,
+    parse_media_sessions,
+    parse_trakt_history,
+    response_timestamp,
+)
 from .tmdb import TMDB, TMDBError
+from .trakt import TraktAuthError, TraktClient, TraktError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,13 +47,22 @@ class TVTrackerHub:
         hass: HomeAssistant,
         tmdb: TMDB,
         rooms: list[dict[str, Any]],
+        trakt: TraktClient | None = None,
     ) -> None:
         self.hass = hass
         self.tmdb = tmdb
+        self.trakt = trakt
+        self._connecting: dict[str, Any] | None = None
+        self._connect_task: asyncio.Task | None = None
+        self._trakt_lock = asyncio.Lock()
+        self._sleep = asyncio.sleep
         self.rooms = rooms
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.library = Library()
         self.trackers = {r["name"]: RoomTracker(r["name"]) for r in rooms}
+        self._sessions: dict[str, list[dict[str, Any]]] = {}
+        self._polling: set[str] = set()
+        self._last_ts: dict[str, str] = {}
         self._unsubs: list[Any] = []
 
     # ---- lifecycle -------------------------------------------------------
@@ -61,12 +84,26 @@ class TVTrackerHub:
                 self.hass, self._scheduled_refresh, timedelta(hours=REFRESH_INTERVAL_HOURS)
             )
         )
+        self._unsubs.append(
+            async_track_time_interval(
+                self.hass, self._poll_all_adb, timedelta(seconds=ADB_POLL_SECONDS)
+            )
+        )
+        if self.trakt:
+            self._unsubs.append(
+                async_track_time_interval(
+                    self.hass, self._scheduled_trakt, timedelta(hours=TRAKT_SYNC_HOURS)
+                )
+            )
+            self.hass.async_create_task(self.async_trakt_sync())
         self.hass.async_create_task(self.async_refresh_all())
 
     async def async_stop(self) -> None:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        if self._connect_task and not self._connect_task.done():
+            self._connect_task.cancel()
         now = dt_util.utcnow()
         for tracker in self.trackers.values():
             session = tracker.close(now)
@@ -84,8 +121,17 @@ class TVTrackerHub:
     # ---- room tracking ---------------------------------------------------
     def _make_handler(self, room: str):
         @callback
-        def _handle(_event: Any) -> None:
+        def _handle(event: Any) -> None:
             self._evaluate(room)
+            # When the ADB entity changes state (play/pause/app switch), look
+            # at the media session straight away instead of waiting for the timer.
+            old, new = event.data.get("old_state"), event.data.get("new_state")
+            if (
+                new is not None
+                and "adb_response" in new.attributes
+                and (old is None or old.state != new.state)
+            ):
+                self.hass.async_create_task(self._poll_adb(room))
 
         return _handle
 
@@ -96,10 +142,61 @@ class TVTrackerHub:
             st = self.hass.states.get(entity_id)
             if st is not None:
                 states.append({"state": st.state, "attributes": dict(st.attributes)})
-        closed = self.trackers[room].update(observe(states), dt_util.utcnow())
+        closed = self.trackers[room].update(
+            observe(states, self._sessions.get(room)), dt_util.utcnow()
+        )
         for session in closed:
             self._record(session)
         self.changed()
+
+    # ---- ADB media-session polling --------------------------------------
+    def _adb_entity(self, room: str) -> str | None:
+        """The room's Android Debug Bridge entity, if it has one and is in use."""
+        for entity_id in next(r["entities"] for r in self.rooms if r["name"] == room):
+            st = self.hass.states.get(entity_id)
+            if (
+                st is not None
+                and "adb_response" in st.attributes
+                and st.state in ("playing", "paused", "on", "buffering")
+            ):
+                return entity_id
+        return None
+
+    async def _poll_adb(self, room: str) -> None:
+        entity_id = self._adb_entity(room)
+        if entity_id is None:
+            if self._sessions.pop(room, None) is not None:
+                self._evaluate(room)
+            return
+        if room in self._polling:
+            return
+        self._polling.add(room)
+        try:
+            await self.hass.services.async_call(
+                "androidtv",
+                "adb_command",
+                {"entity_id": entity_id, "command": MEDIA_SESSION_CMD},
+                blocking=True,
+            )
+            st = self.hass.states.get(entity_id)
+            text = st.attributes.get("adb_response") if st else None
+            stamp = response_timestamp(text)
+            if stamp is None or stamp == self._last_ts.get(room):
+                # No fresh answer: don't trust an old one.
+                self._sessions[room] = []
+            else:
+                self._last_ts[room] = stamp
+                self._sessions[room] = parse_media_sessions(text)
+            self._evaluate(room)
+        except Exception as err:  # noqa: BLE001 - never let a poll break tracking
+            _LOGGER.debug("ADB poll for %s failed: %s", room, err)
+        finally:
+            self._polling.discard(room)
+
+    async def _poll_all_adb(self, _now: datetime) -> None:
+        for room in self.trackers:
+            if self.trackers[room].current is not None or self._adb_entity(room):
+                await self._poll_adb(room)
 
     def now_watching(self, room: str) -> dict[str, Any] | None:
         return self.trackers[room].current
@@ -124,7 +221,9 @@ class TVTrackerHub:
                 "title": (item["title"] if item else None)
                 or session.get("series_title")
                 or session.get("title"),
-                "episode_title": session.get("title") if item else None,
+                "episode_title": (
+                    session.get("subtitle") or (session.get("title") if item else None)
+                ),
                 "season": session.get("season"),
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),
@@ -152,3 +251,174 @@ class TVTrackerHub:
 
     async def _scheduled_refresh(self, _now: datetime) -> None:
         await self.async_refresh_all()
+
+    # ---- Trakt -------------------------------------------------------------
+    @property
+    def trakt_status(self) -> str:
+        if self.trakt is None:
+            return "not_configured"
+        if self._connecting:
+            return "waiting_for_approval"
+        tokens = self.library.data.get("trakt") or {}
+        return "connected" if tokens.get("refresh_token") else "not_connected"
+
+    @property
+    def trakt_info(self) -> dict[str, Any]:
+        tokens = self.library.data.get("trakt") or {}
+        info: dict[str, Any] = {"last_sync": tokens.get("last_sync")}
+        if tokens.get("last_error"):
+            info["last_error"] = tokens["last_error"]
+        if self._connecting:
+            info["user_code"] = self._connecting["user_code"]
+            info["verification_url"] = self._connecting["verification_url"]
+        return info
+
+    def _notify(self, notification_id: str, title: str, message: str) -> None:
+        persistent_notification.async_create(
+            self.hass, message, title=title, notification_id=f"tvtracker_{notification_id}"
+        )
+
+    async def async_trakt_connect(self) -> dict[str, Any]:
+        """Start the device-code login. The user approves at trakt.tv/activate."""
+        if self.trakt is None:
+            raise ValueError(
+                "Add your Trakt client ID and secret first "
+                "(Settings > Devices & services > TV Tracker > Configure)"
+            )
+        code = await self.trakt.device_code()
+        reply = {
+            "user_code": code["user_code"],
+            "verification_url": code.get("verification_url", "https://trakt.tv/activate"),
+        }
+        self._connecting = dict(reply)
+        self._notify(
+            "trakt",
+            "Connect Trakt",
+            f"Go to {reply['verification_url']} and enter the code "
+            f"**{reply['user_code']}** to connect TV Tracker to your Trakt account.",
+        )
+        if self._connect_task and not self._connect_task.done():
+            self._connect_task.cancel()
+        self._connect_task = self.hass.async_create_task(self._poll_device(code))
+        self.changed()
+        return reply
+
+    async def _poll_device(self, code: dict[str, Any]) -> None:
+        interval = max(int(code.get("interval") or 5), 1)
+        deadline = dt_util.utcnow() + timedelta(seconds=int(code.get("expires_in") or 600))
+        outcome = "expired"
+        try:
+            while dt_util.utcnow() < deadline:
+                await self._sleep(interval)
+                state, tokens = await self.trakt.poll_token(code["device_code"])
+                if state == "ok" and tokens:
+                    self._store_trakt_tokens(tokens, connecting=True)
+                    outcome = "ok"
+                    break
+                if state == "slow_down":
+                    interval += 5
+                elif state in ("expired", "denied", "invalid"):
+                    outcome = state
+                    break
+        except TraktError as err:
+            _LOGGER.warning("Trakt login failed: %s", err)
+            outcome = "error"
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._connecting = None
+        if outcome == "ok":
+            self._notify("trakt", "Trakt connected", "TV Tracker is now connected to Trakt.")
+            self.changed()
+            await self.async_trakt_sync()
+        else:
+            self._notify(
+                "trakt",
+                "Trakt not connected",
+                f"The Trakt login did not complete ({outcome}). "
+                "Run the tvtracker.trakt_connect action to try again.",
+            )
+            self.changed()
+
+    def _store_trakt_tokens(self, tokens: dict[str, Any], connecting: bool = False) -> None:
+        old = self.library.data.get("trakt") or {}
+        created = float(tokens.get("created_at") or dt_util.utcnow().timestamp())
+        self.library.data["trakt"] = {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "expires_at": created + float(tokens.get("expires_in") or 7 * 86400),
+            "connected_at": (dt_util.utcnow().isoformat() if connecting else old.get("connected_at")),
+            "last_sync": None if connecting else old.get("last_sync"),
+            "seen": [] if connecting else old.get("seen", []),
+        }
+        self.changed()
+
+    async def async_trakt_disconnect(self) -> None:
+        self.library.data.pop("trakt", None)
+        self.changed()
+
+    async def _trakt_access_token(self) -> str:
+        tokens = self.library.data.get("trakt") or {}
+        if not tokens.get("refresh_token"):
+            raise TraktAuthError("Trakt is not connected")
+        if tokens["expires_at"] - dt_util.utcnow().timestamp() < 86400:
+            self._store_trakt_tokens(await self.trakt.refresh(tokens["refresh_token"]))
+            tokens = self.library.data["trakt"]
+        return tokens["access_token"]
+
+    async def async_trakt_sync(self) -> dict[str, Any]:
+        """Pull new watches from Trakt and apply them to the library."""
+        result = {"status": self.trakt_status, "applied": 0, "new_items": 0, "titled_history": 0}
+        if self.trakt is None or self.trakt_status != "connected":
+            return result
+        async with self._trakt_lock:
+            tokens = self.library.data["trakt"]
+            now = dt_util.utcnow()
+            try:
+                access = await self._trakt_access_token()
+                if tokens.get("last_sync"):
+                    since = datetime.fromisoformat(tokens["last_sync"]) - timedelta(
+                        days=TRAKT_SYNC_OVERLAP_DAYS
+                    )
+                else:
+                    since = now - timedelta(days=TRAKT_INITIAL_DAYS)
+                events = parse_trakt_history(
+                    await self.trakt.history(access, since.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+                )
+            except TraktAuthError as err:
+                self.library.data["trakt"] = {**tokens, "refresh_token": None, "last_error": str(err)}
+                self._notify("trakt", "Trakt disconnected", f"{err}. Run tvtracker.trakt_connect.")
+                self.changed()
+                result["status"] = self.trakt_status
+                return result
+            except TraktError as err:
+                _LOGGER.warning("Trakt sync failed: %s", err)
+                tokens["last_error"] = str(err)
+                self.changed()
+                result["error"] = str(err)
+                return result
+
+            tokens = self.library.data["trakt"]
+            seen: list = list(tokens.get("seen", []))
+            for ev in events:
+                if ev["trakt_id"] in seen:
+                    continue
+                key = item_key(ev["media_type"], ev["tmdb_id"])
+                if key not in self.library.data["items"]:
+                    try:
+                        await self.fetch_item(ev["media_type"], ev["tmdb_id"])
+                    except TMDBError as err:
+                        _LOGGER.warning("Skipping Trakt item %s: %s", ev["title"], err)
+                        continue
+                    result["new_items"] += 1
+                self.library.apply_trakt_event(key, ev)
+                if self.library.attach_history_title(key, ev):
+                    result["titled_history"] += 1
+                seen.append(ev["trakt_id"])
+                result["applied"] += 1
+            tokens.update(seen=seen[-3000:], last_sync=now.isoformat(), last_error=None)
+            self.changed()
+        return result
+
+    async def _scheduled_trakt(self, _now: datetime) -> None:
+        await self.async_trakt_sync()

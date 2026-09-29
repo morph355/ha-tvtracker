@@ -21,9 +21,13 @@
   "options": {
     "step": {
       "init": {
-        "title": "Rooms",
-        "description": "Each room lists the media_player entities that belong to one TV, e.g. a SHIELD's Google Cast entity (titles) and its Android TV entity (app).",
-        "data": {"rooms": "Rooms"}
+        "title": "TV Tracker settings",
+        "description": "Rooms: each lists the media_player entities that belong to one TV. Trakt (optional): create an app at trakt.tv/oauth/applications and paste its client ID and secret, then run the tvtracker.trakt_connect action.",
+        "data": {
+          "rooms": "Rooms",
+          "trakt_client_id": "Trakt client ID",
+          "trakt_client_secret": "Trakt client secret"
+        }
       }
     }
   }

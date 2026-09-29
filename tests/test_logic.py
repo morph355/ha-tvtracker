@@ -11,6 +11,9 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    infer_season,
+    parse_episode_label,
+    parse_media_sessions,
     parse_providers,
 )
 
@@ -53,6 +56,22 @@ def test_observe_ignores_stale_cast_title_when_idle():
     adb = {"state": "on", "attributes": {"app_id": "com.google.android.youtube.tv"}}
     obs = observe([cast, adb])
     assert obs.service == "YouTube" and obs.title is None
+
+
+def test_observe_ignores_stale_title_from_a_different_app():
+    """Real case: Disney+ in the foreground (ADB) while the Cast entity still
+    holds a paused Spotify podcast. The podcast title must not leak in."""
+    cast = {"state": "paused", "attributes": {
+        "app_id": "AndroidNativeApp", "app_name": "Spotify",
+        "media_title": "S13 EP21: Sneaky Sasquatch ",
+        "media_artist": "Parenting Hell with Rob Beckett and Josh Widdicombe"}}
+    adb = {"state": "on", "attributes": {
+        "app_id": "com.disney.disneyplus", "app_name": "com.disney.disneyplus"}}
+    obs = observe([cast, adb])
+    assert obs == Observation("tv_movies", "Disney+")  # app known, no title
+    # ...and the same for a stale title from another *streaming* app
+    cast["attributes"] = {"app_name": "Netflix", "media_title": "Old show"}
+    assert observe([cast, adb]).title is None
 
 
 def test_observe_ignores_music_and_off():
@@ -189,3 +208,167 @@ def test_match_score():
     assert logic.match_score("Severance", None, "Severance: The Chair")
     assert not logic.match_score("Up", None, "Upload")
     assert not logic.match_score("Up", None, "Up Here")
+
+
+# Real output from the SHIELD (`dumpsys media_session`) while Disney+ played
+# Welcome to Wrexham, with a stale paused Spotify podcast and an idle Netflix.
+ADB_TEXT = """package=com.disney.disneyplus
+      state=PlaybackState {state=3, position=234528, buffered position=0, speed=1.0, updated=5381215743, actions=879, custom actions=[], active item id=-1, error=null}
+      metadata: size=3, description=Welcome to Wrexham, null, null
+      package=com.spotify.tv.android
+      state=PlaybackState {state=2, position=2647093, buffered position=0, speed=0.0, updated=5366468773, actions=7319548, custom actions=[], active item id=0, error=null}
+      metadata: size=21, description=S13 EP21: Sneaky Sasquatch , Parenting Hell with Rob Beckett and Josh Widdicombe, null
+      package=com.netflix.ninja
+      metadata: null"""
+
+
+def test_parse_media_sessions_real_output():
+    disney, spotify, netflix = parse_media_sessions(ADB_TEXT)
+    assert disney == {"package": "com.disney.disneyplus", "state": 3, "position_ms": 234528,
+                      "title": "Welcome to Wrexham", "subtitle": None}
+    assert spotify["state"] == 2 and spotify["title"] == "S13 EP21: Sneaky Sasquatch"
+    assert spotify["subtitle"].startswith("Parenting Hell")
+    assert netflix == {"package": "com.netflix.ninja", "state": None, "position_ms": None,
+                       "title": None, "subtitle": None}
+    assert parse_media_sessions(None) == [] and parse_media_sessions("") == []
+
+
+def test_parse_media_sessions_title_with_comma():
+    text = "package=a.b\n  state=PlaybackState {state=3, position=5, x}\n  metadata: size=3, description=Hello, World, null, null"
+    assert parse_media_sessions(text)[0]["title"] == "Hello, World"
+
+
+def test_observe_fills_title_from_adb_media_session():
+    """Disney+ is the foreground app but only the media session has the title."""
+    remote = {"state": "on", "attributes": {"app_id": "com.disney.disneyplus",
+              "app_name": "com.disney.disneyplus"}}
+    stale_cast = {"state": "paused", "attributes": {"app_name": "Spotify", "app_id": "AndroidNativeApp",
+                  "media_title": "S13 EP21: Sneaky Sasquatch "}}
+    obs = observe([remote, stale_cast], parse_media_sessions(ADB_TEXT))
+    assert (obs.service, obs.title, obs.position_ms) == ("Disney+", "Welcome to Wrexham", 234528)
+    # the stale Spotify session must never be picked up for Disney+
+    assert observe([remote], [s for s in parse_media_sessions(ADB_TEXT) if s["package"] != "com.disney.disneyplus"]).title is None
+    # paused Disney+ session still counts; a stopped/none one does not
+    paused = [{**parse_media_sessions(ADB_TEXT)[0], "state": 2}]
+    assert observe([remote], paused).title == "Welcome to Wrexham"
+    stopped = [{**parse_media_sessions(ADB_TEXT)[0], "state": 1}]
+    assert observe([remote], stopped).title is None
+
+
+def test_cast_title_wins_over_adb_and_youtube_still_works():
+    cast = {"state": "playing", "attributes": {"app_id": "2C6A6E3D", "app_name": "YouTube",
+            "media_title": "A video", "media_artist": "BBC News"}}
+    adb = {"state": "playing", "attributes": {"app_id": "com.google.android.youtube.tv", "app_name": "YouTube"}}
+    sessions = [{"package": "com.google.android.youtube.tv", "state": 3, "position_ms": 10,
+                 "title": "Something else", "subtitle": None}]
+    obs = observe([cast, adb], sessions)
+    assert obs.title == "A video" and obs.channel == "BBC News"
+
+
+def test_room_tracker_detects_back_to_back_episodes():
+    rt = RoomTracker("Living Room")
+    ep = lambda pos: Observation("tv_movies", "Disney+", title="Welcome to Wrexham", position_ms=pos)
+    rt.update(ep(5_000), t(0))
+    rt.update(ep(1_500_000), t(25))            # well into episode 1
+    assert rt.update(ep(1_600_000), t(26)) == []
+    closed = rt.update(ep(3_000), t(45))       # position reset: episode 2 started
+    assert len(closed) == 1 and closed[0]["title"] == "Welcome to Wrexham"
+    assert rt.current["start"] == t(45)
+    # pausing and resuming (position keeps increasing) is one session
+    rt.update(ep(200_000), t(48))
+    assert rt.update(ep(210_000), t(60)) == []
+    # restarting right at the start of an episode you'd barely watched is NOT a new episode
+    rt2 = RoomTracker("x")
+    rt2.update(ep(90_000), t(0))
+    assert rt2.update(ep(2_000), t(3)) == []
+
+
+def test_parse_episode_label():
+    assert parse_episode_label("Series 1: 18. Farnsby & B") == (1, 18)      # BBC iPlayer, real
+    assert parse_episode_label("S13 EP21: Sneaky Sasquatch ") == (13, 21)   # the Spotify podcast style
+    assert parse_episode_label("S2:E4 Woe's Hollow") == (2, 4)
+    assert parse_episode_label("S2 E4") == (2, 4)
+    assert parse_episode_label("Season 2, Episode 4") == (2, 4)
+    assert parse_episode_label("Series 12: 3. The One") == (12, 3)
+    for none in (None, "", "Farnsby & B", "Sunday 8pm", "Series 1", "Episode 4"):
+        assert parse_episode_label(none) is None
+
+
+# Real output from the SHIELD while BBC iPlayer played Ghosts US.
+IPLAYER_TEXT = """package=bbc.iplayer.android
+      state=PlaybackState {state=3, position=5921, buffered position=57600, speed=1.0, updated=5387213341, actions=1049423, custom actions=[], active item id=-1, error=null}
+      metadata: size=4, description=Ghosts US, Series 1: 18. Farnsby & B, null
+      package=com.spotify.tv.android
+      state=PlaybackState {state=2, position=2647093, buffered position=0, speed=0.0, updated=5366468773, actions=7319548, custom actions=[], active item id=0, error=null}
+      metadata: size=21, description=S13 EP21: Sneaky Sasquatch , Parenting Hell with Rob Beckett and Josh Widdicombe, null"""
+
+
+def test_observe_reads_season_and_episode_from_iplayer_subtitle():
+    remote = {"state": "on", "attributes": {"app_id": "bbc.iplayer.android", "app_name": "bbc.iplayer.android"}}
+    cast = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "BBC iPlayer",
+            "media_title": "Ghosts US"}}
+    adb = {"state": "playing", "attributes": {"app_id": "bbc.iplayer.android", "app_name": "bbc.iplayer.android"}}
+    obs = observe([remote, cast, adb], parse_media_sessions(IPLAYER_TEXT))
+    assert (obs.service, obs.title, obs.season, obs.episode) == ("BBC iPlayer", "Ghosts US", 1, 18)
+    assert obs.subtitle == "Series 1: 18. Farnsby & B"
+    # the Spotify podcast's "S13 EP21" must never be read as iPlayer's episode
+    assert obs.season != 13
+    # a subtitle for a *different* programme than the entities named is not trusted
+    cast["attributes"]["media_title"] = "Something Else"
+    assert observe([remote, cast, adb], parse_media_sessions(IPLAYER_TEXT)).season is None
+
+
+def test_match_score_country_suffix():
+    assert logic.match_score("Ghosts", None, "Ghosts US")
+    assert logic.match_score("Ghosts", "Ghosts (UK)", None)
+    assert logic.match_score("Ghosts US", None, "Ghosts")
+    assert not logic.match_score("Ghosts", None, "Ghost")
+    assert logic.match_score("Us", None, "Us")  # an exact title is unaffected by the suffix rule
+
+
+def test_now_tv_app_is_recognised():
+    """Real case: the Bedroom TV's Cast entity reports the app as just "NOW"."""
+    assert classify("AndroidNativeApp", "NOW") == ("tv_movies", "Now TV")
+    st = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "NOW",
+          "media_title": "Last Week Tonight With John Oliver 24", "media_duration": 2379}}
+    obs = observe([st])
+    assert (obs.service, obs.title) == ("Now TV", "Last Week Tonight With John Oliver 24")
+    # other, unrelated things still aren't mistaken for Now TV
+    assert classify("AndroidNativeApp", "LiveTV") == (None, None)
+    assert classify("com.snowplow.app", "Snow") != ("tv_movies", "Now TV")
+
+
+def test_match_score_trailing_episode_number_for_tv_only():
+    show = "Last Week Tonight with John Oliver"
+    assert logic.match_score(show, None, "Last Week Tonight With John Oliver 24", allow_trailing_number=True)
+    assert not logic.match_score(show, None, "Last Week Tonight With John Oliver 24")  # off by default
+    # a movie sequel must not match the original
+    assert not logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=False)
+    assert logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=True)  # only ever enabled for TV items
+
+
+def test_now_tv_trailing_number_is_the_episode():
+    st = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "NOW",
+          "media_title": "Last Week Tonight With John Oliver 24"}}
+    obs = observe([st])
+    assert (obs.series_title, obs.episode, obs.season) == ("Last Week Tonight With John Oliver", 24, None)
+    # only for Now TV: the same shape on another service is left alone
+    st["attributes"]["app_name"] = "BBC iPlayer"
+    obs = observe([st])
+    assert obs.series_title is None and obs.episode is None
+
+
+def details(seasons, last):
+    return {"seasons": seasons, "last_aired": {"season": last[0], "episode": last[1]}}
+
+
+def test_infer_season():
+    lwt = details({12: 30, 13: 30}, (13, 26))
+    assert infer_season(lwt, None, 24) == 13                                # not started: latest aired season
+    assert infer_season(lwt, {"season": 13, "episode": 23}, 24) == 13       # the next episode in this season
+    # a low number right after the end of a season -> the next season started
+    assert infer_season(lwt, {"season": 12, "episode": 29}, 1) == 13
+    # a low number mid-season is a re-watch of that season, not a new one
+    assert infer_season(lwt, {"season": 13, "episode": 20}, 3) == 13
+    assert infer_season(lwt, None, 99) is None                              # can't exist
+    assert infer_season({}, None, 3) is None

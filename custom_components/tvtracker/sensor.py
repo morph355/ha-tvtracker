@@ -27,6 +27,7 @@ async def async_setup_entry(
         WatchlistsSensor(hub),
         HistorySensor(hub),
         ServicesSensor(hub),
+        TraktSensor(hub),
     ]
     async_add_entities(entities)
 
@@ -135,3 +136,18 @@ class ServicesSensor(_Base):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"services": self._hub.library.data["services"]}
+
+
+class TraktSensor(_Base):
+    _attr_icon = "mdi:television-classic"
+
+    def __init__(self, hub: TVTrackerHub) -> None:
+        super().__init__(hub, "TV Tracker Trakt", "trakt")
+
+    @property
+    def native_value(self) -> str:
+        return self._hub.trakt_status
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._hub.trakt_info

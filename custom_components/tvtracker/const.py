@@ -15,7 +15,13 @@ DEFAULT_ROOMS = [
     {"name": "Bedroom", "entities": ["media_player.master_room_tv"]},
     {
         "name": "Living Room",
-        "entities": ["media_player.shield", "media_player.shield_2"],
+        # Cast (titles), Android TV Remote (app), Android Debug Bridge (titles
+        # for apps like Disney+ that only publish to the media session).
+        "entities": [
+            "media_player.shield",
+            "media_player.shield_2",
+            "media_player.android_tv_192_168_3_131",
+        ],
     },
 ]
 
@@ -36,7 +42,18 @@ MIN_SESSION_SECONDS = 120
 MIN_COUNT_SECONDS = 600
 
 REFRESH_INTERVAL_HOURS = 12
+# How often to look at a TV's media session (title, position) while it is on.
+ADB_POLL_SECONDS = 30
 HISTORY_LIMIT = 1000
+
+CONF_TRAKT_ID = "trakt_client_id"
+CONF_TRAKT_SECRET = "trakt_client_secret"
+# Trakt's streaming sync can add watches late and date-only, so each sync
+# re-reads this many days before the last one and skips what it has applied.
+TRAKT_SYNC_OVERLAP_DAYS = 3
+# On first connect only import this much history (not years of it).
+TRAKT_INITIAL_DAYS = 60
+TRAKT_SYNC_HOURS = 1
 
 SIGNAL_UPDATE = f"{DOMAIN}_update"
 STORAGE_KEY = f"{DOMAIN}.library"

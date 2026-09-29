@@ -28,6 +28,7 @@ async def async_setup_entry(
         HistorySensor(hub),
         ServicesSensor(hub),
         TraktSensor(hub),
+        NeedsConfirmingSensor(hub),
     ]
     async_add_entities(entities)
 
@@ -36,7 +37,7 @@ class _Base(SensorEntity):
     _attr_should_poll = False
     _attr_icon = "mdi:television-play"
     # Attribute blobs are big; keep them out of the recorder database.
-    _unrecorded_attributes = frozenset({"items", "lists", "tv_movies", "youtube", "services"})
+    _unrecorded_attributes = frozenset({"items", "lists", "tv_movies", "youtube", "services", "matches"})
 
     def __init__(self, hub: TVTrackerHub, name: str, unique: str) -> None:
         self._hub = hub
@@ -151,3 +152,25 @@ class TraktSensor(_Base):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self._hub.trakt_info
+
+
+class NeedsConfirmingSensor(_Base):
+    """Viewings labelled 'probably' that are waiting for you to confirm or correct."""
+
+    _attr_icon = "mdi:help-circle-outline"
+
+    def __init__(self, hub: TVTrackerHub) -> None:
+        super().__init__(hub, "TV Tracker Needs Confirming", "needs_confirming")
+
+    @property
+    def native_value(self) -> int:
+        return len(self._hub.pending_matches())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "matches": [
+                {k: h.get(k) for k in ("id", "title", "season", "episode", "episode_title", "service", "room", "start")}
+                for h in self._hub.pending_matches()
+            ]
+        }

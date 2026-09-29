@@ -8,6 +8,43 @@ views:
     path: watching
     icon: mdi:television-play
     cards:
+      # Shown only when a viewing was matched by searching Trakt and is waiting for you.
+      - type: conditional
+        conditions:
+          - condition: numeric_state
+            entity: sensor.tv_tracker_needs_confirming
+            above: 0
+        card:
+          type: vertical-stack
+          cards:
+            - type: markdown
+              title: Is this right?
+              content: |-
+                {% for m in state_attr('sensor.tv_tracker_needs_confirming', 'matches') or [] -%}
+                - **{{ m.title }}** S{{ m.season }}E{{ m.episode }}{% if m.episode_title %} — “{{ m.episode_title }}”{% endif %} *(probably)* · {{ m.service or '?' }}{% if m.room %}, {{ m.room }}{% endif %}
+                {% endfor %}
+                These buttons act on the **newest** one.
+            - type: button
+              name: Yes, that's right
+              icon: mdi:check-circle-outline
+              tap_action:
+                action: perform-action
+                perform_action: tvtracker.confirm_match
+                data:
+                  id: latest
+            - type: entities
+              title: Wrong show? Type the right one
+              entities:
+                - entity: text.tv_tracker_show_search
+                  name: Show name
+            - type: button
+              name: Use the show I typed
+              icon: mdi:swap-horizontal
+              tap_action:
+                action: perform-action
+                perform_action: tvtracker.assign_match
+                data:
+                  id: latest
       - type: markdown
         title: Now watching
         content: |-

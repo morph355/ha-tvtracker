@@ -22,7 +22,7 @@ from .services import async_register_services
 from .tmdb import TMDB
 from .trakt import TraktClient
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.TEXT]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

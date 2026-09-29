@@ -153,3 +153,70 @@ def test_now_tv_episode_number_sets_progress_with_inferred_season_and_trakt_can_
                                    "watched_at": "2026-09-29T20:00:00.000Z"})
     assert lib.data["items"]["tv:1"]["progress"] == {"season": 13, "episode": 22}
     assert lib.data["items"]["tv:1"]["progress_source"] == "trakt"
+
+
+def _movie_or_show_lib(runtime=None):
+    lib = Library()
+    details = {"title": "Ghosts", "year": "2021", "seasons": {1: 20}, "first_air_date": "2021-10-07",
+               "last_aired": {"season": 1, "episode": 20}}
+    if runtime:
+        details["episode_runtime"] = runtime
+    lib.upsert_item("tv", 7, details, {}, NOW)
+    return lib
+
+
+def _sess(minutes, duration_ms=None, final_pos_ms=None, season=1, episode=3):
+    return {"room": "Bedroom", "category": "tv_movies", "service": "BBC iPlayer", "title": "Ghosts",
+            "series_title": None, "season": season, "episode": episode, "channel": None,
+            "duration_ms": duration_ms, "final_pos_ms": final_pos_ms,
+            "start": NOW, "end": NOW + timedelta(minutes=minutes)}
+
+
+def test_an_episode_counts_only_once_80_percent_watched():
+    lib = _movie_or_show_lib()
+    length = 30 * 60_000
+    # 40% through: matched, but progress is left alone
+    assert lib.apply_session(_sess(12, length, int(length * 0.4)), 600) == "tv:7"
+    assert lib.data["items"]["tv:7"]["progress"] is None
+    # 79% -> no, 80% -> yes
+    lib.apply_session(_sess(24, length, int(length * 0.79)), 600)
+    assert lib.data["items"]["tv:7"]["progress"] is None
+    sess = _sess(24, length, int(length * 0.80))
+    lib.apply_session(sess, 600)
+    assert lib.data["items"]["tv:7"]["progress"] == {"season": 1, "episode": 3}
+    assert sess["_fraction"] == 0.8
+
+
+def test_resuming_partway_still_counts_because_position_is_absolute():
+    lib = _movie_or_show_lib()
+    length = 30 * 60_000
+    # only 8 minutes of *this* viewing (it used to fail the 10-minute rule), but you finished the episode
+    lib.apply_session(_sess(8, length, length), 600)
+    assert lib.data["items"]["tv:7"]["progress"] == {"season": 1, "episode": 3}
+
+
+def test_falls_back_to_tmdb_runtime_then_to_ten_minutes():
+    # no length from the TV, but TMDB says 45-minute episodes: 30 min watched is 67% -> not yet
+    lib = _movie_or_show_lib(runtime=45)
+    lib.apply_session(_sess(30), 600)
+    assert lib.data["items"]["tv:7"]["progress"] is None
+    lib.apply_session(_sess(37), 600)                       # 82%
+    assert lib.data["items"]["tv:7"]["progress"] == {"season": 1, "episode": 3}
+    # nothing known about length at all: the old 10-minute rule
+    lib = _movie_or_show_lib()
+    lib.apply_session(_sess(9), 600)
+    assert lib.data["items"]["tv:7"]["progress"] is None
+    lib.apply_session(_sess(11), 600)
+    assert lib.data["items"]["tv:7"]["progress"] == {"season": 1, "episode": 3}
+
+
+def test_movies_use_the_same_rule():
+    lib = Library()
+    lib.upsert_item("movie", 9, {"title": "Dune", "release_date": "2021-10-01", "runtime": 155}, {}, NOW)
+    base = {"room": "Living Room", "category": "tv_movies", "service": "Netflix", "title": "Dune",
+            "series_title": None, "season": None, "episode": None, "channel": None,
+            "start": NOW, "end": NOW + timedelta(minutes=60)}
+    lib.apply_session({**base, "duration_ms": 155 * 60_000, "final_pos_ms": 60 * 60_000}, 600)   # 39%
+    assert not lib.data["items"]["movie:9"]["watched"]
+    lib.apply_session({**base, "duration_ms": 155 * 60_000, "final_pos_ms": 140 * 60_000}, 600)  # 90%
+    assert lib.data["items"]["movie:9"]["watched"]

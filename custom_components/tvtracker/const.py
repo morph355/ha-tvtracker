@@ -38,8 +38,11 @@ DEFAULT_SERVICES = [
 
 # A viewing shorter than this is channel surfing and is not logged.
 MIN_SESSION_SECONDS = 120
-# A viewing at least this long counts as "watched" for the watchlist.
+# A viewing at least this long counts as "watched" for the watchlist, when we
+# can't tell how much of the programme it was (see WATCHED_FRACTION).
 MIN_COUNT_SECONDS = 600
+# With the programme's length known, it counts once this much of it was watched.
+WATCHED_FRACTION = 0.8
 
 REFRESH_INTERVAL_HOURS = 12
 # How often to look at a TV's media session (title, position) while it is on.

@@ -598,3 +598,37 @@ async def test_trakt_sync_explains_an_empty_import(hass, setup_trakt, fake_trakt
     res = await call(hass, "trakt_sync")
     assert (res["fetched"], res["without_tmdb_id"], res["applied"]) == (0, 0, 0)
     assert hass.states.get("sensor.tv_tracker_trakt").attributes["last_result"]["fetched"] == 0
+
+
+async def test_partial_viewing_is_not_counted_but_finishing_after_resuming_is(hass, setup, freezer):
+    """A Cast-only TV (like the Bedroom one): 80% of the programme has to be watched."""
+    from homeassistant.util import dt as dt_util
+
+    await call(hass, "add_to_list", list="Shows", title="Welcome to Wrexham")
+    room = "media_player.master_room_tv"
+    hub = hass.data[DOMAIN][setup.entry_id]
+
+    def play(position_s):
+        hass.states.async_set(room, "playing", {
+            "app_id": "AndroidNativeApp", "app_name": "Disney+", "media_title": "Welcome to Wrexham",
+            "media_duration": 2700.0, "media_position": position_s,
+            "media_position_updated_at": dt_util.utcnow().isoformat()})
+
+    # 15 of 45 minutes, then the TV goes off: logged (over 2 min) but not counted
+    play(0.0)
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=15))
+    hass.states.async_set(room, "off", {})
+    await hass.async_block_till_done()
+    assert hub.library.data["items"]["tv:1234"]["progress"] is None
+    assert hub.library.data["history"][-1]["watched_pct"] == 33
+
+    # later: resume at 15 min and watch 25 more -> 40 of 45 minutes, 89%: counts, once
+    play(900.0)
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=25))
+    hass.states.async_set(room, "off", {})
+    await hass.async_block_till_done()
+    assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+    assert hub.library.data["history"][-1]["watched_pct"] == 89
+    assert [h["watched_pct"] for h in hub.library.data["history"]] == [33, 89]

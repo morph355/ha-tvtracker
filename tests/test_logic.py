@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from tvt import logic
 from tvt.logic import (
@@ -48,7 +48,7 @@ def test_observe_shield_combines_cast_title_and_adb_app():
     adb = {"state": "on", "attributes": {"app_id": "com.google.android.youtube.tv",
            "app_name": "com.google.android.youtube.tv"}}
     obs = observe([cast, adb])
-    assert obs == Observation("youtube", "YouTube", title="A video", channel="BBC News")
+    assert obs == Observation("youtube", "YouTube", title="A video", channel="BBC News", playing=True)
 
 
 def test_observe_ignores_stale_cast_title_when_idle():
@@ -372,3 +372,50 @@ def test_infer_season():
     assert infer_season(lwt, {"season": 13, "episode": 20}, 3) == 13
     assert infer_season(lwt, None, 99) is None                              # can't exist
     assert infer_season({}, None, 3) is None
+
+
+def test_observe_reads_position_and_length_from_cast():
+    """Real values from the Bedroom TV playing BBC iPlayer (QI)."""
+    st = {"state": "playing", "attributes": {
+        "app_id": "AndroidNativeApp", "app_name": "BBC iPlayer", "media_title": "QI",
+        "media_duration": 1761.04, "media_position": 930.612,
+        "media_position_updated_at": "2026-09-29T19:17:10.497022+00:00"}}
+    obs = observe([st])
+    assert (obs.duration_ms, obs.position_ms, obs.playing) == (1_761_040, 930_612, True)
+    assert obs.position_at == datetime(2026, 9, 29, 19, 17, 10, 497022, tzinfo=timezone.utc)
+    # Prime reports a nonsense duration (-0.001): treated as unknown
+    st["attributes"].update(app_name="Prime Video", media_duration=-0.001)
+    assert observe([st]).duration_ms is None
+    # HA can hand the timestamp over as a datetime already
+    st["attributes"].update(app_name="BBC iPlayer", media_position_updated_at=datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc))
+    assert observe([st]).position_at == datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
+
+
+def test_room_tracker_works_out_how_far_through_you_got():
+    T0 = datetime(2026, 9, 29, 20, 0, tzinfo=timezone.utc)
+    ep = lambda pos, playing=True, at=T0: Observation(
+        "tv_movies", "BBC iPlayer", title="QI", position_ms=pos, duration_ms=1_800_000,
+        playing=playing, position_at=at)
+
+    # playing: the position is wound forward from when Cast said it was true, until the TV goes off
+    rt = RoomTracker("Bedroom")
+    rt.update(ep(60_000), T0)
+    closed = rt.update(None, T0 + timedelta(minutes=20))
+    assert closed[0]["final_pos_ms"] == 60_000 + 20 * 60_000 and closed[0]["duration_ms"] == 1_800_000
+
+    # paused: it stays where it was, however long the TV is left on
+    rt = RoomTracker("Bedroom")
+    rt.update(ep(60_000), T0)
+    rt.update(ep(600_000, playing=False, at=T0 + timedelta(minutes=9)), T0 + timedelta(minutes=9))
+    closed = rt.update(None, T0 + timedelta(hours=3))
+    assert closed[0]["final_pos_ms"] == 600_000
+
+    # never past the end
+    rt = RoomTracker("Bedroom")
+    rt.update(ep(1_700_000), T0)
+    assert rt.update(None, T0 + timedelta(hours=1))[0]["final_pos_ms"] == 1_800_000
+
+    # no position known at all
+    rt = RoomTracker("Bedroom")
+    rt.update(Observation("tv_movies", "Netflix"), T0)
+    assert rt.update(None, T0 + timedelta(minutes=30))[0]["final_pos_ms"] is None

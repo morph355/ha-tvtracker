@@ -89,8 +89,8 @@ If a title matches more than one thing (e.g. a TV show and a movie with the same
 
 ## How it decides what counts
 
-- A session shorter than 2 minutes is ignored (channel surfing).
-- A session of 10+ minutes on a title in your lists counts as watched: movies are marked watched; for shows the reported season/episode is used, or otherwise progress advances by one episode.
+- A session shorter than 2 minutes is ignored (channel surfing). Stopping part-way still logs the viewing; it just doesn't move your progress until you've finished it.
+- A viewing counts as **watched once you've seen 80% of it**. "How much" is worked out from the playback position and the length the TV reports (iPlayer, Now TV and Apple TV report a length); that also copes with resuming part-way through, so finishing an episode you started yesterday counts. If the TV doesn't report a length, TMDB's episode runtime is used; if neither is known, 10 minutes is the fallback. Movies use the same rule; for shows on your lists, the reported season/episode is used, or progress advances by one episode. Each history entry records `watched_pct`, so you can see why something didn't count.
 - While a TV with an ADB entity is in use, TV Tracker reads its media session every 30 s (and whenever it plays/pauses) to get the title.
 - Progress only moves forward automatically (a re-watch won't reset it). `set_progress` can move it anywhere.
 - Status is one of *want to watch*, *upcoming* (not released), *watching*, *caught up* (up to date on a running show) or *finished*.

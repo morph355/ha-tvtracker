@@ -7,7 +7,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from .const import DEFAULT_SERVICES, HISTORY_LIMIT
+from .const import DEFAULT_SERVICES, HISTORY_LIMIT, WATCHED_FRACTION
 from .logic import (
     availability,
     canonical_service,
@@ -264,9 +264,12 @@ class Library:
         if key is None:
             return None
         seconds = (session["end"] - session["start"]).total_seconds()
-        if seconds < min_count_seconds:
-            return key
         item = self.data["items"][key]
+        fraction = self.watched_fraction(session, item, seconds)
+        session["_fraction"] = fraction
+        counts = fraction >= WATCHED_FRACTION if fraction is not None else seconds >= min_count_seconds
+        if not counts:
+            return key
         when = session["end"]
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
@@ -288,6 +291,23 @@ class Library:
             if nxt:
                 self.set_progress(key, nxt[0], nxt[1], when, source="guess")
         return key
+
+    @staticmethod
+    def watched_fraction(session: dict[str, Any], item: dict[str, Any], seconds: float) -> float | None:
+        """How much of the programme was watched (0..1), or None if unknowable.
+
+        Best: the playback position over the length the TV reported (that also
+        copes with resuming part-way through). Next: time watched over TMDB's
+        runtime. Otherwise None, and the caller uses a minimum-minutes rule.
+        """
+        duration, position = session.get("duration_ms"), session.get("final_pos_ms")
+        if duration and duration >= 60_000 and position is not None:
+            return min(position / duration, 1.0)
+        details = item.get("details") or {}
+        runtime = details.get("episode_runtime") if item["media_type"] == "tv" else details.get("runtime")
+        if runtime:
+            return min(seconds / 60 / runtime, 1.0)
+        return None
 
     # ---- Trakt -------------------------------------------------------------
     def apply_trakt_event(self, key: str, event: dict[str, Any]) -> None:

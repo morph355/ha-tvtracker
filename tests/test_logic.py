@@ -11,6 +11,7 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    infer_season,
     parse_episode_label,
     parse_media_sessions,
     parse_providers,
@@ -344,3 +345,30 @@ def test_match_score_trailing_episode_number_for_tv_only():
     # a movie sequel must not match the original
     assert not logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=False)
     assert logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=True)  # only ever enabled for TV items
+
+
+def test_now_tv_trailing_number_is_the_episode():
+    st = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "NOW",
+          "media_title": "Last Week Tonight With John Oliver 24"}}
+    obs = observe([st])
+    assert (obs.series_title, obs.episode, obs.season) == ("Last Week Tonight With John Oliver", 24, None)
+    # only for Now TV: the same shape on another service is left alone
+    st["attributes"]["app_name"] = "BBC iPlayer"
+    obs = observe([st])
+    assert obs.series_title is None and obs.episode is None
+
+
+def details(seasons, last):
+    return {"seasons": seasons, "last_aired": {"season": last[0], "episode": last[1]}}
+
+
+def test_infer_season():
+    lwt = details({12: 30, 13: 30}, (13, 26))
+    assert infer_season(lwt, None, 24) == 13                                # not started: latest aired season
+    assert infer_season(lwt, {"season": 13, "episode": 23}, 24) == 13       # the next episode in this season
+    # a low number right after the end of a season -> the next season started
+    assert infer_season(lwt, {"season": 12, "episode": 29}, 1) == 13
+    # a low number mid-season is a re-watch of that season, not a new one
+    assert infer_season(lwt, {"season": 13, "episode": 20}, 3) == 13
+    assert infer_season(lwt, None, 99) is None                              # can't exist
+    assert infer_season({}, None, 3) is None

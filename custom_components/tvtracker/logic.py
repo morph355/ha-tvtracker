@@ -274,6 +274,12 @@ def observe(
             obs.channel = attrs.get("media_artist")
         break
 
+    if obs.service == "Now TV" and obs.title and obs.season is None:
+        # Now TV sends "Show Name 24": the trailing number is the episode.
+        m = re.match(r"^(.*\S)\s+(\d{1,3})$", obs.title)
+        if m:
+            obs.series_title, obs.episode = m.group(1), int(m.group(2))
+
     if sessions:
         packages = {
             (st.get("attributes") or {}).get("app_id")
@@ -509,6 +515,35 @@ def next_episode(details: dict[str, Any], progress: dict[str, int] | None) -> tu
         return s, e + 1
     later = [n for n in seasons if n > s]
     return (min(later), 1) if later else None
+
+
+def infer_season(
+    details: dict[str, Any], progress: dict[str, int] | None, episode: int
+) -> int | None:
+    """Work out which season a bare episode number belongs to.
+
+    For apps that only give "Show Name 24". Uses where you are in the show: the
+    season you're on, or the latest aired one for a show you haven't started. A
+    lower number right at the end of a season means the next season began.
+    Returns None when it can't be one of the show's seasons.
+    """
+    seasons = {s: c for s, c in _seasons(details).items() if c > 0}
+    if not seasons or episode < 1:
+        return None
+    if progress:
+        cur = progress["season"]
+    elif details.get("last_aired"):
+        cur = details["last_aired"]["season"]
+    else:
+        cur = min(seasons)
+    if cur not in seasons:
+        return None
+    if progress and episode < progress["episode"]:
+        near_end = progress["episode"] >= seasons[cur] - 1
+        if near_end and cur + 1 in seasons and episode <= seasons[cur + 1]:
+            return cur + 1
+        return cur if episode <= seasons[cur] else None   # an older episode again
+    return cur if episode <= seasons[cur] else None
 
 
 def has_aired(details: dict[str, Any], season: int, episode: int) -> bool:

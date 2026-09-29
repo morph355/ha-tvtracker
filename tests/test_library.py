@@ -135,3 +135,21 @@ def test_now_tv_style_title_with_trailing_number_matches_a_show_but_not_a_movie(
             "start": NOW, "end": NOW + timedelta(minutes=35)}
     assert lib.match_session({**base, "title": "Last Week Tonight With John Oliver 24"}) == "tv:1"
     assert lib.match_session({**base, "title": "Toy Story 4"}) is None
+
+
+def test_now_tv_episode_number_sets_progress_with_inferred_season_and_trakt_can_correct_it():
+    lib = Library()
+    lib.upsert_item("tv", 1, {"title": "Last Week Tonight with John Oliver", "year": "2014",
+                              "seasons": {12: 30, 13: 30}, "first_air_date": "2014-04-27",
+                              "last_aired": {"season": 13, "episode": 26}}, {}, NOW)
+    sess = {"room": "Bedroom", "category": "tv_movies", "service": "Now TV",
+            "title": "Last Week Tonight With John Oliver 24", "series_title": "Last Week Tonight With John Oliver",
+            "season": None, "episode": 24, "channel": None, "start": NOW, "end": NOW + timedelta(minutes=35)}
+    assert lib.apply_session(sess, 600) == "tv:1"
+    item = lib.data["items"]["tv:1"]
+    assert item["progress"] == {"season": 13, "episode": 24} and item["progress_source"] == "inferred"
+    # Trakt knows better and may correct an inferred value, even backwards
+    lib.apply_trakt_event("tv:1", {"media_type": "tv", "season": 13, "episode": 22,
+                                   "watched_at": "2026-09-29T20:00:00.000Z"})
+    assert lib.data["items"]["tv:1"]["progress"] == {"season": 13, "episode": 22}
+    assert lib.data["items"]["tv:1"]["progress_source"] == "trakt"

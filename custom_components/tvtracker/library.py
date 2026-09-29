@@ -12,6 +12,7 @@ from .logic import (
     availability,
     canonical_service,
     derive_status,
+    infer_season,
     match_score,
     next_episode,
     norm_title,
@@ -269,6 +270,14 @@ class Library:
         when = session["end"]
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
+        elif session.get("episode") and not session.get("season"):
+            # An episode number without a season (Now TV): infer the season.
+            season = infer_season(item["details"], item.get("progress"), session["episode"])
+            if season:
+                self.set_progress(
+                    key, season, session["episode"], when,
+                    only_forward=True, source="inferred",
+                )
         elif session.get("season") and session.get("episode"):
             self.set_progress(
                 key, session["season"], session["episode"], when,
@@ -293,7 +302,7 @@ class Library:
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
             return
-        guessed = item.get("progress_source") == "guess"
+        guessed = item.get("progress_source") in ("guess", "inferred")
         self.set_progress(
             key, event["season"], event["episode"], when,
             only_forward=not guessed, source="trakt",

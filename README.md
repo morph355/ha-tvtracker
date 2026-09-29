@@ -96,6 +96,7 @@ If a title matches more than one thing (e.g. a TV show and a movie with the same
 ## Limitations
 
 - Titles depend on what each app publishes. YouTube (Cast) gives video + channel; Disney+ gives the title through ADB; other apps (Netflix, iPlayer…) are untested and may publish nothing, in which case the session is logged without a title. Fill those in with `log_watch`.
+- **Now TV** puts the episode number on the end of the title ("Show Name 24") but no season; the season is inferred from where you are in the show (marked `inferred`, and Trakt corrects it). **BBC iPlayer** publishes "Series 1: 18. Episode name" through ADB, which gives both. Without ADB on a TV, iPlayer gives only the show name via Cast.
 - Apps publish a title but not season/episode numbers, so watching a show on the watchlist advances it by one episode per viewing. Back-to-back episodes (autoplay) are detected when the playback position jumps back to the start after most of an episode was played. Correct it any time with `set_progress`.
 - Availability comes from TMDB/JustWatch for the configured country and can lag reality.
 - If HA restarts mid-viewing, the open session is closed and logged at shutdown.

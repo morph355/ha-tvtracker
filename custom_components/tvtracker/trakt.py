@@ -139,3 +139,39 @@ class TraktClient:
             if len(body) < PAGE_SIZE:
                 break
         return out
+
+    # ---- writing (additions and hiding only; this client never deletes history) ----
+    async def _get_list(self, path: str, token: str) -> list[dict[str, Any]]:
+        status, body = await self._request("GET", path, token=token)
+        if status in (401, 403):
+            raise TraktAuthError("Trakt rejected the access token")
+        if status != 200 or not isinstance(body, list):
+            raise TraktError(f"Could not read {path} (HTTP {status})")
+        return body
+
+    async def _post(self, path: str, token: str, body: dict[str, Any]) -> dict[str, Any]:
+        status, data = await self._request("POST", path, token=token, json=body)
+        if status in (401, 403):
+            raise TraktAuthError("Trakt rejected the access token")
+        if status not in (200, 201):
+            raise TraktError(f"Trakt refused {path} (HTTP {status})")
+        return data if isinstance(data, dict) else {}
+
+    async def watched_shows(self, token: str) -> list[dict[str, Any]]:
+        """Every show you have watched, with the episodes watched (for de-duplicating)."""
+        return await self._get_list("/sync/watched/shows", token)
+
+    async def watched_movies(self, token: str) -> list[dict[str, Any]]:
+        return await self._get_list("/sync/watched/movies", token)
+
+    async def add_history(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add watches: {"shows": [...], "movies": [...]}. Returns Trakt's added/not_found."""
+        return await self._post("/sync/history", token, payload)
+
+    async def hide(self, token: str, section: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Hide shows from a Trakt section (progress_watched, calendar, ...)."""
+        return await self._post(f"/users/hidden/{section}", token, payload)
+
+    async def unhide(self, token: str, section: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Un-hide (removes the *hide*, never any history)."""
+        return await self._post(f"/users/hidden/{section}/remove", token, payload)

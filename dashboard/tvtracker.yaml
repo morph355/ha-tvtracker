@@ -54,19 +54,23 @@ views:
 
           {% endfor %}
 
-  - title: History
+  - title: TV & Movies
     path: history
     icon: mdi:history
     cards:
       - type: markdown
-        title: Recently watched — TV & movies
+        title: Recently watched
         content: |-
           {% for h in state_attr('sensor.tv_tracker_history', 'tv_movies') or [] -%}
           - **{{ h.title or 'Unknown' }}**{% if h.season %} S{{ h.season }}E{{ h.episode }}{% endif %} — {{ h.service or '?' }}{% if h.room %}, {{ h.room }}{% endif %} · {{ as_timestamp(h.start) | timestamp_custom('%a %d %b %H:%M') }}
           {% endfor %}
 
+  - title: YouTube
+    path: youtube
+    icon: mdi:youtube
+    cards:
       - type: markdown
-        title: Recently watched — YouTube
+        title: Recently watched
         content: |-
           {% for h in state_attr('sensor.tv_tracker_history', 'youtube') or [] -%}
           - **{{ h.title or 'Unknown video' }}**{% if h.channel %} — {{ h.channel }}{% endif %}{% if h.room %} ({{ h.room }}){% endif %} · {{ as_timestamp(h.start) | timestamp_custom('%a %d %b %H:%M') }}

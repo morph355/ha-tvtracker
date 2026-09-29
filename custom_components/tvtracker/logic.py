@@ -554,6 +554,79 @@ def parse_trakt_history(items: list[dict[str, Any]] | None) -> list[dict[str, An
     return events
 
 
+def parse_trakt_watched_shows(items: list[dict[str, Any]] | None) -> dict[int, dict[int, set[int]]]:
+    """Trakt /sync/watched/shows -> {tmdb_id: {season: {episode numbers watched}}}."""
+    out: dict[int, dict[int, set[int]]] = {}
+    for it in items or []:
+        tmdb = ((it.get("show") or {}).get("ids") or {}).get("tmdb")
+        if not tmdb:
+            continue
+        seasons = out.setdefault(int(tmdb), {})
+        for season in it.get("seasons") or []:
+            eps = {int(e["number"]) for e in season.get("episodes") or [] if e.get("number")}
+            seasons.setdefault(int(season.get("number", 0)), set()).update(eps)
+    return out
+
+
+def parse_trakt_watched_movies(items: list[dict[str, Any]] | None) -> set[int]:
+    return {
+        int(((it.get("movie") or {}).get("ids") or {})["tmdb"])
+        for it in items or []
+        if ((it.get("movie") or {}).get("ids") or {}).get("tmdb")
+    }
+
+
+def aired_episodes(details: dict[str, Any]) -> list[tuple[int, int]]:
+    """Every (season, episode) that has aired, as far as TMDB tells us (no specials)."""
+    last = details.get("last_aired")
+    if not last:
+        return []
+    out: list[tuple[int, int]] = []
+    for season, count in sorted(_seasons(details).items()):
+        if season > last["season"]:
+            break
+        top = last["episode"] if season == last["season"] else count
+        out.extend((season, e) for e in range(1, min(top, count) + 1) if e >= 1)
+    return out
+
+
+def missing_aired_episodes(
+    details: dict[str, Any], watched: dict[int, set[int]] | None
+) -> list[tuple[int, int]]:
+    """Aired episodes that Trakt doesn't yet have a watch for."""
+    have = watched or {}
+    return [(s, e) for s, e in aired_episodes(details) if e not in have.get(s, set())]
+
+
+def build_history_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Outbox entries -> a Trakt POST /sync/history body (additions only).
+
+    Each entry: {media_type, tmdb_id, season, episode, watched_at}; watched_at may be
+    "released" (Trakt uses the episode's air date).
+    """
+    shows: dict[int, dict[int, list[dict[str, Any]]]] = {}
+    movies: list[dict[str, Any]] = []
+    for en in entries:
+        if en["media_type"] == "movie":
+            movies.append({"ids": {"tmdb": en["tmdb_id"]}, "watched_at": en["watched_at"]})
+        else:
+            shows.setdefault(en["tmdb_id"], {}).setdefault(en["season"], []).append(
+                {"number": en["episode"], "watched_at": en["watched_at"]}
+            )
+    payload: dict[str, Any] = {}
+    if shows:
+        payload["shows"] = [
+            {
+                "ids": {"tmdb": tmdb},
+                "seasons": [{"number": n, "episodes": eps} for n, eps in sorted(seasons.items())],
+            }
+            for tmdb, seasons in shows.items()
+        ]
+    if movies:
+        payload["movies"] = movies
+    return payload
+
+
 # --------------------------------------------------------------------------
 # Episodes and status
 # --------------------------------------------------------------------------

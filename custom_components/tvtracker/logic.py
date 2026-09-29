@@ -153,15 +153,26 @@ def observe(states: list[dict[str, Any]]) -> Observation | None:
     active entity; the title only from entities that are actually playing or
     paused *and* agree with the chosen app (Cast titles go stale when idle).
     """
+    # The foreground app is authoritative from an entity that is simply "on"
+    # (Android TV Remote / ADB report only the foreground app). A paused or
+    # playing Cast entity can be a stale session, so it is only the fallback
+    # for TVs that have a single entity.
     chosen: tuple[str, str] | None = None
-    for st in states:
+    ordered = [s for s in states if s.get("state") == "on"] + [
+        s for s in states if s.get("state") != "on"
+    ]
+    for st in ordered:
         if st.get("state") not in ACTIVE_STATES:
             continue
         attrs = st.get("attributes") or {}
+        if not (attrs.get("app_id") or attrs.get("app_name")):
+            continue
         category, service = classify(attrs.get("app_id"), attrs.get("app_name"))
         if category and service:
             chosen = (category, service)
-            break
+        # An "on" entity that names a non-content app (launcher, music) means
+        # nothing is being watched; don't fall through to a stale entity.
+        break
     if chosen is None:
         return None
 
@@ -172,9 +183,13 @@ def observe(states: list[dict[str, Any]]) -> Observation | None:
         attrs = st.get("attributes") or {}
         if not attrs.get("media_title"):
             continue
-        category, service = classify(attrs.get("app_id"), attrs.get("app_name"))
-        if service is not None and service != chosen[1]:
-            continue
+        # An entity that names an app must be the *chosen* app. This also
+        # rejects stale titles from ignored apps (e.g. a paused Spotify
+        # podcast left on a Cast entity while Disney+ is in the foreground).
+        if attrs.get("app_id") or attrs.get("app_name"):
+            _, service = classify(attrs.get("app_id"), attrs.get("app_name"))
+            if service != chosen[1]:
+                continue
         obs.title = attrs.get("media_title")
         obs.series_title = attrs.get("media_series_title")
         obs.season = _as_int(attrs.get("media_season"))

@@ -55,6 +55,22 @@ def test_observe_ignores_stale_cast_title_when_idle():
     assert obs.service == "YouTube" and obs.title is None
 
 
+def test_observe_ignores_stale_title_from_a_different_app():
+    """Real case: Disney+ in the foreground (ADB) while the Cast entity still
+    holds a paused Spotify podcast. The podcast title must not leak in."""
+    cast = {"state": "paused", "attributes": {
+        "app_id": "AndroidNativeApp", "app_name": "Spotify",
+        "media_title": "S13 EP21: Sneaky Sasquatch ",
+        "media_artist": "Parenting Hell with Rob Beckett and Josh Widdicombe"}}
+    adb = {"state": "on", "attributes": {
+        "app_id": "com.disney.disneyplus", "app_name": "com.disney.disneyplus"}}
+    obs = observe([cast, adb])
+    assert obs == Observation("tv_movies", "Disney+")  # app known, no title
+    # ...and the same for a stale title from another *streaming* app
+    cast["attributes"] = {"app_name": "Netflix", "media_title": "Old show"}
+    assert observe([cast, adb]).title is None
+
+
 def test_observe_ignores_music_and_off():
     spotify = {"state": "paused", "attributes": {"app_id": "AndroidNativeApp", "app_name": "Spotify",
                "media_title": "song"}}

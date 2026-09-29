@@ -221,6 +221,9 @@ def async_register_services(hass: HomeAssistant) -> None:
             if service:
                 lib.add_service(service)
             result["item"] = lib.view(item["key"], _today(hass))
+            result["sent_to_trakt"] = hub.queue_manual_watch(item, data, service, end)
+            if result["sent_to_trakt"]:
+                await hub.flush_outbox()
         result["history_id"] = lib.add_history(entry)["id"]
         hub.changed()
         return result
@@ -259,7 +262,13 @@ def async_register_services(hass: HomeAssistant) -> None:
             if hub.trakt is None:
                 raise ServiceValidationError("Searching without a show needs Trakt set up")
             if not matches:
-                raise ServiceValidationError("No show on Trakt has an episode with exactly that title")
+                info = hub.last_episode_search
+                seen = "; ".join(info.get("sample") or []) or "nothing"
+                raise ServiceValidationError(
+                    "No show on Trakt has an episode with exactly that title. "
+                    f"Tried {info.get('queries')}; Trakt returned {info.get('returned', 0)} "
+                    f"episodes (first few: {seen})"
+                )
             return {"matches": matches[:5]}
         item = await _resolve(hub, call.data)
         if item["media_type"] != "tv":

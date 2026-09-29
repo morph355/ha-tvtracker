@@ -431,6 +431,8 @@ def fake_trakt(monkeypatch):
 
     async def search_episodes(self, query, token=None):
         state["search_calls"].append(query)
+        if state.get("search_by_query") is not None:       # text search that is fussy about punctuation
+            return list(state["search_by_query"].get(query, []))
         return list(state["episode_search"])
 
     async def unhide(self, token, section, payload):
@@ -1191,3 +1193,48 @@ async def test_a_correction_that_cannot_be_made_changes_nothing(hass, setup_trak
         assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
         assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "1"
     assert fake_trakt["added"] == []
+
+
+
+async def test_the_title_is_tried_with_and_without_punctuation_and_a_miss_is_explained(hass, setup_trakt, fake_trakt):
+    await _connect(hass, setup_trakt)
+    hit = trakt_episode_hit("Lanterns", 95350, 1, 7, "The Jordan Boys' Legacy")
+    # Trakt only finds it with a straight apostrophe, not the curly one Now TV sends
+    fake_trakt["search_by_query"] = {"The Jordan Boys' Legacy": [hit]}
+    res = await call(hass, "find_episode", episode_title=JORDAN)
+    assert res["matches"][0]["show"] == "Lanterns" and res["matches"][0]["episode"] == 7
+    assert fake_trakt["search_calls"] == [JORDAN, "The Jordan Boys' Legacy"]     # stops once it has an answer
+
+    # a miss says what was tried and what came back
+    fake_trakt["search_calls"].clear()
+    fake_trakt["search_by_query"] = {"The Jordan Boys Legacy": [trakt_episode_hit("Other Show", 5, 2, 2, "The Jordan Boys Reunion")]}
+    with pytest.raises(ServiceValidationError) as err:
+        await call(hass, "find_episode", episode_title=JORDAN)
+    message = str(err.value)
+    assert "Tried" in message and "The Jordan Boys Legacy" in message and "Other Show: The Jordan Boys Reunion" in message
+    assert len(fake_trakt["search_calls"]) == 3                                   # all three forms
+
+
+async def test_an_episode_you_log_yourself_is_sent_to_trakt_only_on_services_trakt_does_not_sync(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    # Lanterns S1E3 by name (made-up test data), watched on Now TV: certain, and Now TV isn't synced by Trakt
+    res = await call(hass, "log_watch", title="Lanterns", episode_title="The Jordan Boys' Legacy", service="Now TV",
+                     room="Bedroom", watched_at="2026-09-29 21:00:00", duration_minutes=45)
+    assert res["item"]["progress"] == "S1E3" and res["sent_to_trakt"] is True
+    (payload,) = fake_trakt["added"]
+    assert payload["shows"][0]["ids"] == {"tmdb": 95350}
+    ep = payload["shows"][0]["seasons"][0]["episodes"][0]
+    assert ep["number"] == 3 and ep["watched_at"].endswith(".000Z")
+
+    # Apple TV: Trakt syncs it itself, so nothing is sent
+    res = await call(hass, "log_watch", title="Severance", season=2, episode=1, service="Apple TV")
+    assert res["sent_to_trakt"] is False and len(fake_trakt["added"]) == 1
+    # no season/episode known, or a service we didn't name: nothing sent
+    res = await call(hass, "log_watch", title="Ghosts", service="BBC iPlayer")
+    assert res["sent_to_trakt"] is False and len(fake_trakt["added"]) == 1
+
+
+async def test_a_manual_log_is_not_sent_when_trakt_is_not_set_up(hass, setup):
+    res = await call(hass, "log_watch", title="Lanterns", season=1, episode=2, service="Now TV")
+    assert res["item"]["progress"] == "S1E2" and res["sent_to_trakt"] is False

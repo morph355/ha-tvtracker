@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -68,6 +69,7 @@ class TVTrackerHub:
         self._outbox_lock = asyncio.Lock()
         self._sleep = asyncio.sleep
         self.search_text = ""        # what you typed into the "show search" box
+        self.last_episode_search: dict[str, Any] = {}
         self.rooms = rooms
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.library = Library()
@@ -203,14 +205,36 @@ class TVTrackerHub:
             _LOGGER.debug("Episode lookup for %s failed: %s", title, err)
 
     async def search_trakt_episodes(self, title: str) -> list[dict[str, Any]]:
-        """Episodes anywhere on Trakt with exactly this title (needs Trakt set up)."""
+        """Episodes anywhere on Trakt with exactly this title (needs Trakt set up).
+
+        Text search can be fussy about punctuation, so the title is tried as sent, with
+        a straight apostrophe, and with punctuation removed. `last_episode_search`
+        keeps what came back, so a miss can be explained.
+        """
+        self.last_episode_search = {"title": title, "queries": [], "returned": 0, "sample": []}
         if self.trakt is None or len(norm(title)) < MIN_EPISODE_SEARCH_CHARS:
             return []
         try:
             token = await self._trakt_access_token() if self.trakt_status == "connected" else None
         except TraktError:
             token = None
-        return parse_trakt_episode_search(await self.trakt.search_episodes(title, token), title)
+        variants = [title, title.replace("\u2019", "'").replace("\u2018", "'"),
+                    re.sub(r"[^\w\s]", " ", title)]
+        seen: list[str] = []
+        raw: list[dict[str, Any]] = []
+        for query in variants:
+            query = " ".join(query.split())
+            if not query or query in seen:
+                continue
+            seen.append(query)
+            raw.extend(await self.trakt.search_episodes(query, token))
+            if parse_trakt_episode_search(raw, title):
+                break
+        self.last_episode_search.update(
+            queries=seen, returned=len(raw),
+            sample=[f"{(h.get('show') or {}).get('title')}: {(h.get('episode') or {}).get('title')}" for h in raw[:5]],
+        )
+        return parse_trakt_episode_search(raw, title)
 
     async def _find_episode_on_trakt(self, session: dict[str, Any]) -> None:
         """Nothing you track has this episode: ask Trakt which show it belongs to.
@@ -580,6 +604,26 @@ class TVTrackerHub:
         if entry not in self.trakt_outbox:
             self.trakt_outbox.append(entry)
             self.hass.async_create_task(self._flush_outbox())
+
+    def queue_manual_watch(self, item: dict[str, Any], data: dict[str, Any], service: str | None, end: datetime) -> bool:
+        """A viewing you logged yourself is certain: queue it for Trakt, but only on
+        services Trakt doesn't sync itself (otherwise it would be a duplicate)."""
+        if not (self.trakt and service in TRAKT_PUSH_SERVICES):
+            return False
+        when = end.astimezone(dt_util.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        if item["media_type"] == "movie":
+            entry = {"media_type": "movie", "tmdb_id": item["tmdb_id"], "watched_at": when}
+        elif data.get("season") and data.get("episode"):
+            entry = {"media_type": "tv", "tmdb_id": item["tmdb_id"], "season": data["season"],
+                     "episode": data["episode"], "watched_at": when}
+        else:
+            return False
+        if entry not in self.trakt_outbox:
+            self.trakt_outbox.append(entry)
+        return True
+
+    async def flush_outbox(self) -> dict[str, Any]:
+        return await self._flush_outbox()
 
     async def _flush_outbox(self) -> dict[str, Any]:
         """Send everything queued for Trakt. Failures stay queued and are retried."""

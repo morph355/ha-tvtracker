@@ -11,6 +11,7 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    parse_episode_label,
     parse_media_sessions,
     parse_providers,
 )
@@ -279,3 +280,46 @@ def test_room_tracker_detects_back_to_back_episodes():
     rt2 = RoomTracker("x")
     rt2.update(ep(90_000), t(0))
     assert rt2.update(ep(2_000), t(3)) == []
+
+
+def test_parse_episode_label():
+    assert parse_episode_label("Series 1: 18. Farnsby & B") == (1, 18)      # BBC iPlayer, real
+    assert parse_episode_label("S13 EP21: Sneaky Sasquatch ") == (13, 21)   # the Spotify podcast style
+    assert parse_episode_label("S2:E4 Woe's Hollow") == (2, 4)
+    assert parse_episode_label("S2 E4") == (2, 4)
+    assert parse_episode_label("Season 2, Episode 4") == (2, 4)
+    assert parse_episode_label("Series 12: 3. The One") == (12, 3)
+    for none in (None, "", "Farnsby & B", "Sunday 8pm", "Series 1", "Episode 4"):
+        assert parse_episode_label(none) is None
+
+
+# Real output from the SHIELD while BBC iPlayer played Ghosts US.
+IPLAYER_TEXT = """package=bbc.iplayer.android
+      state=PlaybackState {state=3, position=5921, buffered position=57600, speed=1.0, updated=5387213341, actions=1049423, custom actions=[], active item id=-1, error=null}
+      metadata: size=4, description=Ghosts US, Series 1: 18. Farnsby & B, null
+      package=com.spotify.tv.android
+      state=PlaybackState {state=2, position=2647093, buffered position=0, speed=0.0, updated=5366468773, actions=7319548, custom actions=[], active item id=0, error=null}
+      metadata: size=21, description=S13 EP21: Sneaky Sasquatch , Parenting Hell with Rob Beckett and Josh Widdicombe, null"""
+
+
+def test_observe_reads_season_and_episode_from_iplayer_subtitle():
+    remote = {"state": "on", "attributes": {"app_id": "bbc.iplayer.android", "app_name": "bbc.iplayer.android"}}
+    cast = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "BBC iPlayer",
+            "media_title": "Ghosts US"}}
+    adb = {"state": "playing", "attributes": {"app_id": "bbc.iplayer.android", "app_name": "bbc.iplayer.android"}}
+    obs = observe([remote, cast, adb], parse_media_sessions(IPLAYER_TEXT))
+    assert (obs.service, obs.title, obs.season, obs.episode) == ("BBC iPlayer", "Ghosts US", 1, 18)
+    assert obs.subtitle == "Series 1: 18. Farnsby & B"
+    # the Spotify podcast's "S13 EP21" must never be read as iPlayer's episode
+    assert obs.season != 13
+    # a subtitle for a *different* programme than the entities named is not trusted
+    cast["attributes"]["media_title"] = "Something Else"
+    assert observe([remote, cast, adb], parse_media_sessions(IPLAYER_TEXT)).season is None
+
+
+def test_match_score_country_suffix():
+    assert logic.match_score("Ghosts", None, "Ghosts US")
+    assert logic.match_score("Ghosts", "Ghosts (UK)", None)
+    assert logic.match_score("Ghosts US", None, "Ghosts")
+    assert not logic.match_score("Ghosts", None, "Ghost")
+    assert logic.match_score("Us", None, "Us")  # an exact title is unaffected by the suffix rule

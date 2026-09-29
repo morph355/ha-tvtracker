@@ -110,3 +110,15 @@ def test_services_and_history():
     assert [h["title"] for h in lib.recent_history("tv_movies")] == ["old"]
     assert [h["title"] for h in lib.recent_history(None)] == ["v", "old"]
     assert lib.delete_history(e1["id"]) and not lib.delete_history(e1["id"])
+
+
+def test_reported_episode_from_iplayer_style_session_updates_progress():
+    lib = Library()
+    lib.upsert_item("tv", 4242, {"title": "Ghosts", "year": "2021", "seasons": {1: 20}, "first_air_date": "2021-10-07",
+                                 "last_aired": {"season": 1, "episode": 20}, "status": "Returning Series"}, {}, NOW)
+    sess = {"room": "Living Room", "category": "tv_movies", "service": "BBC iPlayer", "title": "Ghosts US",
+            "series_title": None, "season": 1, "episode": 18, "channel": None, "subtitle": "Series 1: 18. Farnsby & B",
+            "start": NOW, "end": NOW + timedelta(minutes=25)}
+    assert lib.apply_session(sess, 600) == "tv:4242"
+    item = lib.data["items"]["tv:4242"]
+    assert item["progress"] == {"season": 1, "episode": 18} and item["progress_source"] == "reported"

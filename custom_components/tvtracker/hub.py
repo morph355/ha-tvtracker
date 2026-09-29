@@ -221,7 +221,9 @@ class TVTrackerHub:
                 "title": (item["title"] if item else None)
                 or session.get("series_title")
                 or session.get("title"),
-                "episode_title": session.get("title") if item else None,
+                "episode_title": (
+                    session.get("subtitle") or (session.get("title") if item else None)
+                ),
                 "season": session.get("season"),
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),

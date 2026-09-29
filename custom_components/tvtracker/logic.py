@@ -56,6 +56,22 @@ def canonical_service(name: str) -> str:
     return SERVICE_ALIASES.get(norm(name), (name or "").strip())
 
 
+_EPISODE_LABEL_RE = re.compile(
+    r"\b(?:series|season|s)\s*(\d{1,2})\s*[:,.\-\u2013]?\s*(?:episode|ep|e)?\s*[:.]?\s*(\d{1,3})\b",
+    re.I,
+)
+
+
+def parse_episode_label(text: str | None) -> tuple[int, int] | None:
+    """Read (season, episode) from a subtitle such as 'Series 1: 18. Farnsby & B',
+    'S13 EP21: Sneaky Sasquatch', 'S2:E4' or 'Season 2, Episode 4'."""
+    m = _EPISODE_LABEL_RE.search(text or "")
+    if not m:
+        return None
+    season, episode = int(m.group(1)), int(m.group(2))
+    return (season, episode) if season and episode else None
+
+
 # --------------------------------------------------------------------------
 # Apps -> category / service
 # --------------------------------------------------------------------------
@@ -138,6 +154,7 @@ class Observation:
     episode: int | None = None
     channel: str | None = None
     position_ms: int | None = None
+    subtitle: str | None = None
 
 
 def _as_int(value: Any) -> int | None:
@@ -270,6 +287,13 @@ def observe(
                 if obs.title is None:
                     obs.title = sess["title"]
                 obs.position_ms = sess["position_ms"]
+                # The subtitle often carries "Series 1: 18. Episode name" (iPlayer).
+                # Only trust it for the same programme the entities named.
+                if norm_title(sess["title"]) == norm_title(obs.title) and obs.season is None:
+                    label = parse_episode_label(sess.get("subtitle"))
+                    if label:
+                        obs.season, obs.episode = label
+                        obs.subtitle = sess.get("subtitle")
                 break
     return obs
 
@@ -297,6 +321,7 @@ class RoomTracker:
             "season": obs.season,
             "episode": obs.episode,
             "channel": obs.channel,
+            "subtitle": obs.subtitle,
             "start": now,
             "end": None,
             "_last_pos": obs.position_ms,
@@ -329,6 +354,8 @@ class RoomTracker:
             if same and obs is not None:
                 if obs.position_ms is not None:
                     cur["_last_pos"] = obs.position_ms
+                if cur.get("season") is None and obs.season is not None:
+                    cur.update(season=obs.season, episode=obs.episode, subtitle=obs.subtitle)
                 if cur["title"] is None and obs.title:
                     cur.update(
                         title=obs.title,
@@ -336,6 +363,7 @@ class RoomTracker:
                         season=obs.season,
                         episode=obs.episode,
                         channel=obs.channel,
+                        subtitle=obs.subtitle,
                     )
                 return closed
             cur["end"] = now
@@ -571,6 +599,9 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
     }
 
 
+_COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
+
+
 def match_score(item_title: str, *candidates: str | None) -> bool:
     """Does a reported playback title refer to this watchlist title?"""
     target = norm_title(item_title)
@@ -580,6 +611,12 @@ def match_score(item_title: str, *candidates: str | None) -> bool:
         if not cand:
             continue
         if norm_title(cand) == target:
+            return True
+        # "Ghosts US" / "Ghosts (UK)" vs "Ghosts" (and the other way round)
+        stripped = _COUNTRY_SUFFIX.sub("", cand)
+        if stripped != cand and norm_title(stripped) == target:
+            return True
+        if norm_title(_COUNTRY_SUFFIX.sub("", item_title)) == norm_title(cand):
             return True
         # "Severance - S2E4", "Severance: The Chair"
         low = cand.lower().lstrip()

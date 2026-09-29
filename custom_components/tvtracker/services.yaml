@@ -93,3 +93,15 @@ refresh:
 get_library:
   name: Get library
   description: Return all watchlists, in-progress shows, services and recent history.
+
+trakt_connect:
+  name: Connect Trakt
+  description: Start linking your Trakt account. Returns a code to enter at trakt.tv/activate (also shown as a notification). Needs the Trakt client ID and secret set under Configure first.
+
+trakt_sync:
+  name: Sync from Trakt
+  description: Pull new watches from Trakt now (otherwise done hourly). Updates episode progress and names untitled viewings.
+
+trakt_disconnect:
+  name: Disconnect Trakt
+  description: Forget the saved Trakt login on this Home Assistant.

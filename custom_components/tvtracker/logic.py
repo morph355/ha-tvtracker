@@ -410,6 +410,50 @@ def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Trakt
+# --------------------------------------------------------------------------
+def parse_trakt_history(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Turn Trakt /sync/history items into events, oldest first.
+
+    Only entries carrying a TMDB id (which is what our library is keyed on)
+    are kept. Episode events include season/episode; movies don't.
+    """
+    events: list[dict[str, Any]] = []
+    for it in items or []:
+        kind = it.get("type")
+        if kind == "episode" and it.get("show") and it.get("episode"):
+            tmdb = (it["show"].get("ids") or {}).get("tmdb")
+            ep = it["episode"]
+            if tmdb and ep.get("season") and ep.get("number"):
+                events.append(
+                    {
+                        "trakt_id": it.get("id"),
+                        "media_type": "tv",
+                        "tmdb_id": int(tmdb),
+                        "title": it["show"].get("title"),
+                        "season": int(ep["season"]),
+                        "episode": int(ep["number"]),
+                        "episode_title": ep.get("title"),
+                        "watched_at": it.get("watched_at"),
+                    }
+                )
+        elif kind == "movie" and it.get("movie"):
+            tmdb = (it["movie"].get("ids") or {}).get("tmdb")
+            if tmdb:
+                events.append(
+                    {
+                        "trakt_id": it.get("id"),
+                        "media_type": "movie",
+                        "tmdb_id": int(tmdb),
+                        "title": it["movie"].get("title"),
+                        "watched_at": it.get("watched_at"),
+                    }
+                )
+    events.sort(key=lambda e: e["watched_at"] or "")
+    return events
+
+
+# --------------------------------------------------------------------------
 # Episodes and status
 # --------------------------------------------------------------------------
 def _seasons(details: dict[str, Any]) -> dict[int, int]:

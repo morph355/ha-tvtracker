@@ -7,10 +7,20 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_REGION, CONF_ROOMS, CONF_TMDB_KEY, DEFAULT_REGION, DEFAULT_ROOMS, DOMAIN
+from .const import (
+    CONF_REGION,
+    CONF_ROOMS,
+    CONF_TMDB_KEY,
+    CONF_TRAKT_ID,
+    CONF_TRAKT_SECRET,
+    DEFAULT_REGION,
+    DEFAULT_ROOMS,
+    DOMAIN,
+)
 from .hub import TVTrackerHub
 from .services import async_register_services
 from .tmdb import TMDB
+from .trakt import TraktClient
 
 PLATFORMS = [Platform.SENSOR]
 
@@ -22,7 +32,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_REGION, DEFAULT_REGION),
     )
     rooms = _normalise_rooms(entry.options.get(CONF_ROOMS) or DEFAULT_ROOMS)
-    hub = TVTrackerHub(hass, tmdb, rooms)
+    trakt = None
+    if entry.options.get(CONF_TRAKT_ID) and entry.options.get(CONF_TRAKT_SECRET):
+        trakt = TraktClient(
+            async_get_clientsession(hass),
+            entry.options[CONF_TRAKT_ID],
+            entry.options[CONF_TRAKT_SECRET],
+        )
+    hub = TVTrackerHub(hass, tmdb, rooms, trakt)
     await hub.async_load()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = hub

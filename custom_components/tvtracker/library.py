@@ -158,8 +158,13 @@ class Library:
         episode: int,
         when: datetime | str | None = None,
         only_forward: bool = False,
+        source: str = "manual",
     ) -> bool:
-        """Record 'watched up to S<season>E<episode>'. Returns True if changed."""
+        """Record 'watched up to S<season>E<episode>'. Returns True if changed.
+
+        `source` says where the value came from: manual (you said so), trakt,
+        reported (the app gave season/episode) or guess (we counted one on).
+        """
         from .logic import episode_index  # local: keeps import list short
 
         item = self.get_item(key)
@@ -174,6 +179,7 @@ class Library:
                 item["last_watched"] = _iso(when) or item.get("last_watched")
                 return False
         item["progress"] = {"season": int(season), "episode": int(episode)}
+        item["progress_source"] = source
         item["watched"] = False
         item["last_watched"] = _iso(when) or item.get("last_watched")
         return True
@@ -261,12 +267,74 @@ class Library:
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
         elif session.get("season") and session.get("episode"):
-            self.set_progress(key, session["season"], session["episode"], when, only_forward=True)
+            self.set_progress(
+                key, session["season"], session["episode"], when,
+                only_forward=True, source="reported",
+            )
         else:
             nxt = next_episode(item["details"], item.get("progress"))
             if nxt:
-                self.set_progress(key, nxt[0], nxt[1], when)
+                self.set_progress(key, nxt[0], nxt[1], when, source="guess")
         return key
+
+    # ---- Trakt -------------------------------------------------------------
+    def apply_trakt_event(self, key: str, event: dict[str, Any]) -> None:
+        """Apply one Trakt watch (see logic.parse_trakt_history) to an item.
+
+        Trakt knows the real season/episode, so it replaces a *guessed*
+        position (even backwards) but otherwise only ever moves progress
+        forward, so a re-watch or something you set by hand isn't undone.
+        """
+        item = self.get_item(key)
+        when = event.get("watched_at")
+        if item["media_type"] == "movie":
+            self.mark_watched(key, True, when)
+            return
+        guessed = item.get("progress_source") == "guess"
+        self.set_progress(
+            key, event["season"], event["episode"], when,
+            only_forward=not guessed, source="trakt",
+        )
+
+    def attach_history_title(self, key: str, event: dict[str, Any]) -> bool:
+        """Give a TV-detected viewing with no title the show Trakt says it was.
+
+        Trakt records no room and (for streaming syncs) often only a date, so
+        match on: same service carries the title, and within a day of the watch.
+        Each untitled viewing is claimed at most once.
+        """
+        item = self.get_item(key)
+        try:
+            when = datetime.fromisoformat((event.get("watched_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        providers = item.get("providers") or {}
+        carried = {
+            canonical_service(n)
+            for kind in ("flatrate", "ads", "free")
+            for n in providers.get(kind, [])
+        }
+        for h in reversed(self.data["history"]):
+            if h.get("item_key") or h.get("title") or h.get("category") != "tv_movies":
+                continue
+            if h.get("source") != "auto" or canonical_service(h.get("service") or "") not in carried:
+                continue
+            try:
+                start = datetime.fromisoformat(h["start"])
+            except (KeyError, ValueError):
+                continue
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=when.tzinfo)
+            if abs((start - when).total_seconds()) <= 36 * 3600:
+                h.update(
+                    title=item["title"],
+                    item_key=key,
+                    season=event.get("season"),
+                    episode=event.get("episode"),
+                    episode_title=event.get("episode_title"),
+                )
+                return True
+        return False
 
     # ---- views -----------------------------------------------------------
     def view(self, key: str, today: date) -> dict[str, Any]:

@@ -10,7 +10,16 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_REGION, CONF_ROOMS, CONF_TMDB_KEY, DEFAULT_REGION, DEFAULT_ROOMS, DOMAIN
+from .const import (
+    CONF_REGION,
+    CONF_ROOMS,
+    CONF_TMDB_KEY,
+    CONF_TRAKT_ID,
+    CONF_TRAKT_SECRET,
+    DEFAULT_REGION,
+    DEFAULT_ROOMS,
+    DOMAIN,
+)
 from .tmdb import TMDB, TMDBAuthError, TMDBError
 
 
@@ -61,13 +70,26 @@ class TVTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
 class TVTrackerOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
-        current = self.config_entry.options.get(CONF_ROOMS) or DEFAULT_ROOMS
+            data = {k: v for k, v in user_input.items() if v not in (None, "")}
+            return self.async_create_entry(data=data)
+        opts = self.config_entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ROOMS, default=current): selector.ObjectSelector(),
+                    vol.Required(
+                        CONF_ROOMS, default=opts.get(CONF_ROOMS) or DEFAULT_ROOMS
+                    ): selector.ObjectSelector(),
+                    vol.Optional(
+                        CONF_TRAKT_ID,
+                        description={"suggested_value": opts.get(CONF_TRAKT_ID)},
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_TRAKT_SECRET,
+                        description={"suggested_value": opts.get(CONF_TRAKT_SECRET)},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    ),
                 }
             ),
         )

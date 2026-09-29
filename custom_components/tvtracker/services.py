@@ -273,6 +273,11 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub = _hub(hass)
         return await hub.async_confirm_match(call.data["id"])
 
+    async def assign_match(call: ServiceCall):
+        hub = _hub(hass)
+        # no show given: use whatever was typed into the dashboard's show-search box
+        return await hub.async_assign_match(call.data["id"], call.data.get("show") or hub.search_text)
+
     async def trakt_connect(call: ServiceCall):
         hub = _hub(hass)
         try:
@@ -351,7 +356,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         },
     )
     register("find_episode", find_episode, {vol.Required("episode_title"): cv.string, **TARGET})
-    register("confirm_match", confirm_match, {vol.Required("id"): cv.string})
+    register("confirm_match", confirm_match, {vol.Optional("id", default="latest"): cv.string})
+    register(
+        "assign_match",
+        assign_match,
+        {vol.Optional("id", default="latest"): cv.string, vol.Optional("show"): cv.string},
+    )
     register("delete_history", delete_history, {vol.Required("id"): cv.string})
     register("add_service", add_service, {vol.Required("name"): cv.string})
     register("remove_service", remove_service, {vol.Required("name"): cv.string})

@@ -132,4 +132,11 @@ confirm_match:
   name: Confirm a "probably" viewing
   description: A viewing labelled "probably" (found by searching Trakt for the episode title) is made certain and, on services Trakt doesn't sync itself, sent to Trakt.
   fields:
-    id: {required: true, description: The history entry's id, selector: {text: {}}}
+    id: {default: latest, description: "The history entry's id, or 'latest' for the newest viewing waiting for you", selector: {text: {}}}
+
+assign_match:
+  name: Use a different show for a "probably" viewing
+  description: The guess was the wrong show. Name the right one (or type it into the dashboard's show-search box); the episode is found by the same title within that show, the wrong guess is undone, and the viewing becomes certain.
+  fields:
+    id: {default: latest, description: "The history entry's id, or 'latest'", selector: {text: {}}}
+    show: {description: The show it really was; leave empty to use the show-search box, selector: {text: {}}}

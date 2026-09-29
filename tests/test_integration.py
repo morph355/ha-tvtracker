@@ -251,9 +251,17 @@ async def test_dashboard_templates_render(hass, setup, freezer):
 
     dash = yaml.safe_load(pathlib.Path("dashboard/tvtracker.yaml").read_text())
     out = {}
+
+    def markdown_cards(card):
+        if card["type"] == "markdown":
+            yield card
+        for inner in card.get("cards", []) + ([card["card"]] if "card" in card else []):
+            yield from markdown_cards(inner)
+
     for view in dash["views"]:
-        for card in view["cards"]:
-            out[f"{view['title']} / {card['title']}"] = Template(card["content"], hass).async_render(parse_result=False)
+        for top in view["cards"]:
+            for card in markdown_cards(top):
+                out[f"{view['title']} / {card['title']}"] = Template(card["content"], hass).async_render(parse_result=False)
     assert "**Bedroom** — Severance (Netflix)" in out["Watching / Now watching"]
     assert "**Family Room** — off" in out["Watching / Now watching"]
     assert "**Severance** — up next **S1E4**" in out["Watching / Continue watching"]
@@ -1095,3 +1103,91 @@ async def test_nothing_is_searched_when_trakt_is_not_set_up(hass, setup, freezer
     assert hub.library.data["history"][-1]["item_key"] is None
     with pytest.raises(ServiceValidationError):
         await call(hass, "find_episode", episode_title=JORDAN)
+
+
+async def _probable_lanterns_watch(hass, hub, fake_trakt, freezer, guess=("Lanterns", 95350, 1, 3)):
+    await _connect(hass, hub)
+    fake_trakt["episode_search"] = [trakt_episode_hit(guess[0], guess[1], guess[2], guess[3], JORDAN)]
+    await _now_tv_watch(hass, freezer, JORDAN)
+
+
+async def test_the_confirm_button_acts_on_the_latest_match_and_the_card_only_shows_when_needed(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "0"
+    with pytest.raises(ServiceValidationError):                    # nothing waiting: a clear message
+        await call(hass, "confirm_match")
+
+    await _probable_lanterns_watch(hass, hub, fake_trakt, freezer)
+    sensor = hass.states.get("sensor.tv_tracker_needs_confirming")
+    assert sensor.state == "1"
+    (m,) = sensor.attributes["matches"]
+    assert (m["title"], m["season"], m["episode"], m["service"], m["room"]) == ("Lanterns", 1, 3, "Now TV", "Bedroom")
+
+    # the dashboard's "Is this right?" card shows it (rendered from the real dashboard file)
+    import pathlib
+    import yaml
+    from homeassistant.helpers.template import Template
+    card = yaml.safe_load(pathlib.Path("dashboard/tvtracker.yaml").read_text())["views"][0]["cards"][0]
+    assert card["type"] == "conditional" and card["conditions"][0]["entity"] == "sensor.tv_tracker_needs_confirming"
+    shown = Template(card["card"]["cards"][0]["content"], hass).async_render(parse_result=False)
+    assert "**Lanterns** S1E3" in shown and "(probably)" in shown and "Now TV, Bedroom" in shown
+    buttons = [c for c in card["card"]["cards"] if c["type"] == "button"]
+    assert [b["tap_action"]["perform_action"] for b in buttons] == ["tvtracker.confirm_match", "tvtracker.assign_match"]
+    assert all(b["tap_action"]["data"] == {"id": "latest"} for b in buttons)
+
+    res = await call(hass, "confirm_match")                        # no id: what the dashboard button sends is "latest"
+    assert res["sent_to_trakt"] is True and len(fake_trakt["added"]) == 1
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "0"
+    with pytest.raises(ServiceValidationError):
+        await call(hass, "confirm_match")
+    assert len(fake_trakt["added"]) == 1
+
+
+async def test_a_wrong_guess_is_corrected_by_typing_the_right_show(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    # Trakt's search wrongly says it was an episode of Welcome to Wrexham
+    await _probable_lanterns_watch(hass, hub, fake_trakt, freezer, guess=("Welcome to Wrexham", 1234, 1, 1))
+    assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+
+    # nothing typed yet: a clear message and nothing changes
+    with pytest.raises(ServiceValidationError):
+        await call(hass, "assign_match")
+    # typing into the dashboard box, then pressing "Use the show I typed" (no arguments)
+    await hass.services.async_call("text", "set_value",
+                                   {"entity_id": "text.tv_tracker_show_search", "value": "Lanterns"}, blocking=True)
+    assert hass.states.get("text.tv_tracker_show_search").state == "Lanterns"
+    res = await call(hass, "assign_match")
+    assert (res["title"], res["season"], res["episode"], res["sent_to_trakt"]) == ("Lanterns", 1, 3, True)
+
+    assert "tv:1234" not in hub.library.data["items"]                 # only existed because of the wrong guess
+    lanterns = hub.library.data["items"]["tv:95350"]
+    assert lanterns["progress"] == {"season": 1, "episode": 3} and lanterns["progress_source"] == "reported"
+    h = hub.library.data["history"][-1]
+    assert (h["title"], h["item_key"], h["season"], h["episode"], h["probable"]) == ("Lanterns", "tv:95350", 1, 3, False)
+    (payload,) = fake_trakt["added"]                                   # sent once, for the RIGHT show
+    assert payload["shows"][0]["ids"] == {"tmdb": 95350}
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "0"
+
+
+async def test_correcting_a_guess_keeps_a_wrong_show_you_track_but_undoes_its_progress(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Welcome to Wrexham")   # you track it (on a list)
+    fake_trakt["episode_search"] = [trakt_episode_hit("Welcome to Wrexham", 1234, 1, 1, JORDAN)]
+    await _now_tv_watch(hass, freezer, JORDAN)
+    assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+    await call(hass, "assign_match", show="Lanterns")
+    wrexham = hub.library.data["items"]["tv:1234"]                     # still tracked...
+    assert wrexham["progress"] is None and wrexham["lists"]              # ...but the wrong watch is undone
+
+
+async def test_a_correction_that_cannot_be_made_changes_nothing(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _probable_lanterns_watch(hass, hub, fake_trakt, freezer, guess=("Welcome to Wrexham", 1234, 1, 1))
+    for show, message in (("Nonexistent Show Name", "Which show"), ("Severance", "No single episode")):
+        with pytest.raises(ServiceValidationError, match=message):
+            await call(hass, "assign_match", show=show)
+        # still exactly as it was, still waiting
+        assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+        assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "1"
+    assert fake_trakt["added"] == []

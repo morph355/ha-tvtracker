@@ -54,7 +54,15 @@ What it does once connected (`sensor.tv_tracker_trakt` shows `connected`):
 
 If it says `connected` but imports nothing, `sensor.tv_tracker_trakt` has a `last_result` attribute (and `tvtracker.trakt_sync` returns the same numbers): `fetched` is how many watches Trakt sent, `without_tmdb_id` how many we couldn't use, `already_applied` how many an earlier sync handled. `fetched: 0` means Trakt has no history in that window yet.
 
-Remove it any time with `tvtracker.trakt_disconnect`.
+### Adding to Trakt (never deleting)
+
+TV Tracker can also **add** to your Trakt history. It never deletes or edits anything on Trakt.
+
+- **Viewings** on services Trakt does *not* sync itself (**BBC iPlayer, ITVX, Channel 4, Now TV**) are added automatically once you've watched 80% of it, but only when the exact show and episode are known (iPlayer with ADB reports them). Netflix, Disney+, Prime Video and Apple TV are left to Trakt's own sync, so nothing is duplicated, and an episode we only *counted on* is never sent. Anything that can't be sent (Trakt down) waits in a queue (`waiting_to_send` on the Trakt sensor) and is retried every hour.
+- **"I'm up to date on Last Week Tonight"**: `tvtracker.mark_watched` sets HA to the latest aired episode (the show shows as *caught up*, and goes back to *watching* when the next episode airs) and adds the episodes Trakt is missing, dated to when each aired. Trakt is asked what you've already watched first, so no episode is watched twice. Add `dry_run: true` first to see exactly what would be added, changing nothing. `trakt: false` keeps it to HA.
+- **Hiding**: `tvtracker.hide` removes a show from the dashboard lists and hides it in Trakt's progress and calendar (`hidden: false` reverses it). Its history is kept in both places.
+
+Remove the connection any time with `tvtracker.trakt_disconnect`.
 
 ## Using it
 
@@ -67,7 +75,8 @@ Everything is a Home Assistant service (Developer tools → Actions), so it work
 | `tvtracker.add_to_list` / `remove_from_list` | By `title` (or `tmdb_id` + `media_type`). The list is created if missing. |
 | `tvtracker.log_watch` | Add a viewing the TVs missed. Updates progress / marks movies watched. |
 | `tvtracker.set_progress` | "We're up to S2E4." |
-| `tvtracker.mark_watched` | Movie watched, or whole show watched. |
+| `tvtracker.mark_watched` | Movie watched, or show up to date (also adds the missing episodes to Trakt; try `dry_run: true` first). |
+| `tvtracker.hide` | Hide a show/film from the lists here and (shows) on Trakt. History is kept. |
 | `tvtracker.add_service` / `remove_service` | Edit your streaming services. |
 | `tvtracker.delete_history` | Remove a wrong history entry. |
 | `tvtracker.refresh` | Re-check availability now (otherwise every 12 h). |

@@ -10,6 +10,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.tvtracker.const import DOMAIN
 from test_logic import ADB_TEXT, RAW_TV
 
+RAW_GHOSTS = {
+    "name": "Ghosts", "first_air_date": "2021-10-07", "status": "Returning Series", "episode_run_time": [30],
+    "seasons": [{"season_number": 1, "episode_count": 20}],
+    "last_episode_to_air": {"season_number": 1, "episode_number": 20, "runtime": 30},
+    "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "BBC iPlayer"}]}}},
+}
+
 RAW_WREXHAM = {
     "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "status": "Returning Series",
     "seasons": [{"season_number": 1, "episode_count": 20}],
@@ -33,7 +40,8 @@ def fake_tmdb(monkeypatch):
         if path == "/search/tv":
             q = params["query"].lower()
             hits = [{"id": 95396, "name": "Severance", "first_air_date": "2022-02-18", "popularity": 9},
-                    {"id": 1234, "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "popularity": 8}]
+                    {"id": 1234, "name": "Welcome to Wrexham", "first_air_date": "2022-08-24", "popularity": 8},
+                    {"id": 4242, "name": "Ghosts", "first_air_date": "2021-10-07", "popularity": 7}]
             return {"results": [h for h in hits if q in h["name"].lower()]}
         if path == "/search/movie":
             return {"results": [{"id": 438631, "title": "Dune", "release_date": "2021-10-01", "popularity": 5}]
@@ -42,6 +50,8 @@ def fake_tmdb(monkeypatch):
             return RAW_TV
         if path == "/tv/1234":
             return {**RAW_WREXHAM}
+        if path == "/tv/4242":
+            return {**RAW_GHOSTS}
         if path == "/movie/438631":
             return {"title": "Dune", "release_date": "2021-10-01", "runtime": 155,
                     "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "Netflix"}]}}}}
@@ -348,7 +358,8 @@ def _trakt_ep(id_, tmdb, title, season, number, when):
 def fake_trakt(monkeypatch):
     """Replace the network calls of TraktClient; record what the hub asked for."""
     state = {"polls": ["pending", "ok"], "history": [], "history_calls": [], "refreshed": 0,
-             "history_error": None}
+             "history_error": None, "watched_shows": [], "watched_movies": [],
+             "added": [], "hidden": [], "add_error": None}
 
     async def device_code(self):
         return {"device_code": "dc", "user_code": "ABCD1234", "verification_url": "https://trakt.tv/activate",
@@ -369,8 +380,31 @@ def fake_trakt(monkeypatch):
             raise state["history_error"]
         return list(state["history"])
 
+    async def watched_shows(self, token):
+        return list(state["watched_shows"])
+
+    async def watched_movies(self, token):
+        return list(state["watched_movies"])
+
+    async def add_history(self, token, payload):
+        if state["add_error"]:
+            raise state["add_error"]
+        state["added"].append(payload)
+        return {"added": {"episodes": sum(len(s["episodes"]) for sh in payload.get("shows", []) for s in sh["seasons"]),
+                          "movies": len(payload.get("movies", []))}}
+
+    async def hide(self, token, section, payload):
+        state["hidden"].append(("hide", section, payload))
+        return {}
+
+    async def unhide(self, token, section, payload):
+        state["hidden"].append(("unhide", section, payload))
+        return {}
+
     for name, fn in (("device_code", device_code), ("poll_token", poll_token),
-                     ("refresh", refresh), ("history", history)):
+                     ("refresh", refresh), ("history", history), ("watched_shows", watched_shows),
+                     ("watched_movies", watched_movies), ("add_history", add_history),
+                     ("hide", hide), ("unhide", unhide)):
         monkeypatch.setattr(f"custom_components.tvtracker.trakt.TraktClient.{name}", fn)
     return state
 
@@ -632,3 +666,193 @@ async def test_partial_viewing_is_not_counted_but_finishing_after_resuming_is(ha
     assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
     assert hub.library.data["history"][-1]["watched_pct"] == 89
     assert [h["watched_pct"] for h in hub.library.data["history"]] == [33, 89]
+
+
+SEVERANCE_WATCHED = [{"show": {"ids": {"tmdb": 95396}}, "seasons": [
+    {"number": 1, "episodes": [{"number": i} for i in range(1, 10)]},
+    {"number": 2, "episodes": [{"number": i} for i in range(1, 4)]}]}]
+
+
+async def _connect(hass, hub):
+    await call(hass, "trakt_connect")
+    await hass.async_block_till_done()
+    assert hub.trakt_status == "connected"
+
+
+async def test_mark_up_to_date_previews_then_adds_only_the_missing_episodes(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["watched_shows"] = SEVERANCE_WATCHED
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+
+    # 1. preview: reports the plan, changes nothing anywhere
+    res = await call(hass, "mark_watched", title="Severance", dry_run=True)
+    assert res["dry_run"] is True
+    assert res["trakt"]["to_add"] == 7 and res["trakt"]["already_on_trakt"] == 12
+    assert res["trakt"]["episodes"] == [f"S2E{n}" for n in range(4, 11)]
+    assert fake_trakt["added"] == []
+    assert hub.library.data["items"]["tv:95396"]["progress"] is None
+
+    # 2. for real: HA is up to date, and Trakt gets exactly the 7 missing, dated to their air dates
+    res = await call(hass, "mark_watched", title="Severance")
+    assert res["item"]["status"] == "caught_up" and res["item"]["progress"] == "S2E10"
+    assert res["trakt"]["added"] == 7 and res["trakt"]["still_queued"] == 0
+    (payload,) = fake_trakt["added"]
+    assert payload == {"shows": [{"ids": {"tmdb": 95396}, "seasons": [{"number": 2, "episodes": [
+        {"number": n, "watched_at": "released"} for n in range(4, 11)]}]}]}
+
+    # 3. un-marking changes HA only: nothing is ever removed from Trakt
+    res = await call(hass, "mark_watched", title="Severance", watched=False)
+    assert res["trakt"]["status"] == "unchanged" and len(fake_trakt["added"]) == 1
+
+
+async def test_a_failed_send_stays_queued_and_is_retried_by_the_next_sync(hass, setup_trakt, fake_trakt):
+    from custom_components.tvtracker.trakt import TraktError
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["watched_shows"] = SEVERANCE_WATCHED
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+
+    fake_trakt["add_error"] = TraktError("Trakt is down")
+    res = await call(hass, "mark_watched", title="Severance")
+    assert res["item"]["progress"] == "S2E10"                       # HA is still updated
+    assert res["trakt"]["added"] == 0 and res["trakt"]["still_queued"] == 7 and "down" in res["trakt"]["error"]
+    assert hass.states.get("sensor.tv_tracker_trakt").attributes["waiting_to_send"] == 7
+
+    fake_trakt["add_error"] = None
+    await call(hass, "trakt_sync")                                  # the hourly sync flushes the queue
+    assert len(fake_trakt["added"]) == 1 and hub.trakt_outbox == []
+    assert hass.states.get("sensor.tv_tracker_trakt").attributes["waiting_to_send"] == 0
+
+
+async def test_mark_up_to_date_for_a_film_and_when_trakt_is_not_connected(hass, setup, fake_tmdb):
+    # not connected: HA is updated, Trakt is simply not involved
+    res = await call(hass, "mark_watched", title="Severance")
+    assert res["item"]["status"] == "caught_up" and "trakt" not in res
+    res = await call(hass, "mark_watched", title="Severance", dry_run=True)
+    assert res["trakt"]["status"] == "not_configured"
+
+
+async def test_hide_and_unhide_in_ha_and_on_trakt(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "set_progress", title="Severance", season=1, episode=3)
+    assert len((await call(hass, "get_library"))["continue_watching"]) == 1
+
+    res = await call(hass, "hide", title="Severance")
+    assert res["hidden"] is True and res["trakt"] == "hidden"
+    assert [(a, b) for a, b, _ in fake_trakt["hidden"]] == [("hide", "progress_watched"), ("hide", "calendar")]
+    assert fake_trakt["hidden"][0][2] == {"shows": [{"ids": {"tmdb": 95396}}]}
+    lib = await call(hass, "get_library")
+    assert lib["continue_watching"] == [] and lib["lists"]["Shows"] == []
+    assert hub.library.data["items"]["tv:95396"]["progress"] == {"season": 1, "episode": 3}   # history kept
+
+    res = await call(hass, "hide", title="Severance", hidden=False)
+    assert res["trakt"] == "shown" and len((await call(hass, "get_library"))["continue_watching"]) == 1
+    assert [a for a, _, _ in fake_trakt["hidden"][2:]] == ["unhide", "unhide"]
+
+    # HA only: Trakt untouched
+    before = len(fake_trakt["hidden"])
+    await call(hass, "hide", title="Severance", trakt=False)
+    assert len(fake_trakt["hidden"]) == before
+
+
+async def test_only_certain_viewings_on_services_trakt_does_not_sync_are_sent(hass, setup_trakt, fake_trakt, freezer):
+    """iPlayer (with the episode reported) goes to Trakt; Disney+ (Trakt syncs it itself) does not."""
+    from homeassistant.core import ServiceCall
+    from homeassistant.util import dt as dt_util
+    from test_logic import IPLAYER_TEXT
+
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "add_to_list", list="Shows", title="Welcome to Wrexham")
+    ADB = "media_player.android_tv_192_168_3_131"
+    box = {"n": 0, "text": IPLAYER_TEXT}
+
+    async def fake_adb(call_: ServiceCall):
+        box["n"] += 1
+        cur = hass.states.get(ADB)
+        hass.states.async_set(ADB, cur.state, {**cur.attributes, "adb_response": f"{box['text']}\ntvt_ts={box['n']}"})
+
+    hass.services.async_register("androidtv", "adb_command", fake_adb)
+
+    # BBC iPlayer, Series 1 episode 18 reported by the media session, watched to the end
+    hass.states.async_set("media_player.shield_2", "on", {"app_id": "bbc.iplayer.android", "app_name": "bbc.iplayer.android"})
+    hass.states.async_set("media_player.shield", "playing", {
+        "app_id": "AndroidNativeApp", "app_name": "BBC iPlayer", "media_title": "Ghosts US",
+        "media_duration": 1800.0, "media_position": 5.0, "media_position_updated_at": dt_util.utcnow().isoformat()})
+    hass.states.async_set(ADB, "playing", {"app_id": "bbc.iplayer.android", "app_name": "BBC iPlayer", "adb_response": None})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=29))
+    for e in ("media_player.shield_2", "media_player.shield", ADB):
+        hass.states.async_set(e, "off", {"adb_response": None} if e == ADB else {})
+    await hass.async_block_till_done()
+
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 18}
+    (payload,) = fake_trakt["added"]
+    show = payload["shows"][0]
+    assert show["ids"] == {"tmdb": 4242} and show["seasons"][0]["number"] == 1
+    assert show["seasons"][0]["episodes"][0]["number"] == 18
+    assert show["seasons"][0]["episodes"][0]["watched_at"].endswith(".000Z")
+    assert hub.trakt_outbox == []
+
+    # Disney+ for 40 of 45 minutes: counted in HA, but NOT sent (Trakt's own sync covers Disney+)
+    hass.states.async_set("media_player.master_room_tv", "playing", {
+        "app_id": "AndroidNativeApp", "app_name": "Disney+", "media_title": "Welcome to Wrexham",
+        "media_duration": 2700.0, "media_position": 0.0, "media_position_updated_at": dt_util.utcnow().isoformat()})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=40))
+    hass.states.async_set("media_player.master_room_tv", "off", {})
+    await hass.async_block_till_done()
+    assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+    assert len(fake_trakt["added"]) == 1 and hub.trakt_outbox == []
+
+
+async def _watch_on_bedroom(hass, freezer, attrs, minutes=40):
+    from homeassistant.util import dt as dt_util
+    room = "media_player.master_room_tv"
+    hass.states.async_set(room, "playing", {
+        "app_id": "AndroidNativeApp", "media_duration": 2700.0, "media_position": 0.0,
+        "media_position_updated_at": dt_util.utcnow().isoformat(), **attrs})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=minutes))
+    hass.states.async_set(room, "off", {})
+    await hass.async_block_till_done()
+
+
+async def test_a_certain_episode_on_a_service_trakt_already_syncs_is_not_sent(hass, setup_trakt, fake_trakt, freezer):
+    """Disney+ reports season and episode here (so it is certain), but Trakt's own
+    streaming sync covers Disney+, and sending it too would create a duplicate."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Welcome to Wrexham")
+    await _watch_on_bedroom(hass, freezer, {
+        "app_name": "Disney+", "media_title": "Episode Three", "media_series_title": "Welcome to Wrexham",
+        "media_season": 1, "media_episode": 3})
+    item = hub.library.data["items"]["tv:1234"]
+    assert item["progress"] == {"season": 1, "episode": 3} and item["progress_source"] == "reported"
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+
+
+async def test_a_guessed_episode_on_a_service_trakt_does_not_sync_is_not_sent(hass, setup_trakt, fake_trakt, freezer):
+    """iPlayer is on the send list, but with only the show name we merely counted one
+    episode on: not sure enough to write to Trakt."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+    item = hub.library.data["items"]["tv:4242"]
+    assert item["progress"] == {"season": 1, "episode": 1} and item["progress_source"] == "guess"
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+
+
+async def test_nothing_is_sent_when_trakt_is_not_connected(hass, setup, fake_tmdb, freezer):
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await _watch_on_bedroom(hass, freezer, {
+        "app_name": "BBC iPlayer", "media_title": "Ghosts US", "media_series_title": "Ghosts",
+        "media_season": 1, "media_episode": 18})
+    hub = hass.data[DOMAIN][setup.entry_id]
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 18}
+    assert hub.library.data.get("trakt_outbox", []) == []

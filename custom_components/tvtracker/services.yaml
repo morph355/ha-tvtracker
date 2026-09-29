@@ -46,9 +46,11 @@ set_progress:
 
 mark_watched:
   name: Mark watched
-  description: Mark a movie as watched, or a show as fully watched (everything aired so far).
+  description: Mark a movie as watched, or a show as up to date (everything aired so far). When Trakt is connected, the episodes Trakt is missing are added there too (dated to their air date); nothing is ever removed from Trakt.
   fields:
     watched: {default: true, selector: {boolean: {}}}
+    trakt: {description: Also add the missing watches to Trakt, default: true, selector: {boolean: {}}}
+    dry_run: {description: Only report what would be added to Trakt; change nothing, default: false, selector: {boolean: {}}}
     title: {selector: {text: {}}}
     tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
     media_type: {selector: {select: {options: [tv, movie]}}}
@@ -105,3 +107,13 @@ trakt_sync:
 trakt_disconnect:
   name: Disconnect Trakt
   description: Forget the saved Trakt login on this Home Assistant.
+
+hide:
+  name: Hide a show
+  description: Hide a show or film from the dashboard lists, and (for shows) from Trakt's progress and calendar. Its history is kept in both places.
+  fields:
+    hidden: {default: true, selector: {boolean: {}}}
+    trakt: {description: Also hide it on Trakt, default: true, selector: {boolean: {}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}

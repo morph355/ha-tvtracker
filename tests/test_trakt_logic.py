@@ -1,7 +1,16 @@
 from datetime import date, datetime, timedelta, timezone
 
 from tvt.library import Library
-from tvt.logic import parse_details, parse_providers, parse_trakt_history
+from tvt.logic import (
+    aired_episodes,
+    build_history_payload,
+    missing_aired_episodes,
+    parse_details,
+    parse_providers,
+    parse_trakt_history,
+    parse_trakt_watched_movies,
+    parse_trakt_watched_shows,
+)
 from test_logic import RAW_TV
 
 NOW = datetime(2026, 9, 29, 21, 0, tzinfo=timezone.utc)
@@ -95,3 +104,70 @@ def test_attach_history_title_matches_service_and_day_once():
     # nothing left within a day of a far-away watch
     assert not lib.attach_history_title("tv:95396", {**ev, "watched_at": "2026-08-01T00:00:00.000Z"})
     assert not lib.attach_history_title("tv:95396", {**ev, "watched_at": "garbage"})
+
+
+def test_aired_and_missing_episodes():
+    d = {"seasons": {1: 3, 2: 4, 3: 5}, "last_aired": {"season": 2, "episode": 2}}
+    assert aired_episodes(d) == [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2)]   # nothing after S2E2
+    assert aired_episodes({"seasons": {1: 3}}) == []                        # unknown: never guess
+    assert missing_aired_episodes(d, {1: {1, 2, 3}, 2: {1}}) == [(2, 2)]
+    assert missing_aired_episodes(d, None) == aired_episodes(d)
+    assert missing_aired_episodes(d, {1: {1, 2, 3}, 2: {1, 2}, 9: {1}}) == []
+
+
+def test_parse_trakt_watched():
+    shows = parse_trakt_watched_shows([
+        {"show": {"ids": {"tmdb": 5}}, "seasons": [{"number": 1, "episodes": [{"number": 1}, {"number": 2}]},
+                                                     {"number": 2, "episodes": [{"number": 1}]}]},
+        {"show": {"ids": {"trakt": 9}}, "seasons": []},                     # no tmdb id: ignored
+    ])
+    assert shows == {5: {1: {1, 2}, 2: {1}}}
+    assert parse_trakt_watched_movies([{"movie": {"ids": {"tmdb": 7}}}, {"movie": {"ids": {}}}]) == {7}
+
+
+def test_build_history_payload_is_additions_only_and_grouped():
+    entries = [
+        {"media_type": "tv", "tmdb_id": 5, "season": 2, "episode": 4, "watched_at": "released"},
+        {"media_type": "tv", "tmdb_id": 5, "season": 2, "episode": 5, "watched_at": "released"},
+        {"media_type": "tv", "tmdb_id": 5, "season": 1, "episode": 1, "watched_at": "2026-09-29T20:00:00.000Z"},
+        {"media_type": "movie", "tmdb_id": 7, "watched_at": "2026-09-29T21:00:00.000Z"},
+    ]
+    assert build_history_payload(entries) == {
+        "shows": [{"ids": {"tmdb": 5}, "seasons": [
+            {"number": 1, "episodes": [{"number": 1, "watched_at": "2026-09-29T20:00:00.000Z"}]},
+            {"number": 2, "episodes": [{"number": 4, "watched_at": "released"},
+                                       {"number": 5, "watched_at": "released"}]}]}],
+        "movies": [{"ids": {"tmdb": 7}, "watched_at": "2026-09-29T21:00:00.000Z"}],
+    }
+    assert build_history_payload([]) == {}
+
+
+def test_hidden_items_are_left_out_of_lists_but_kept():
+    lib = make_lib()
+    lib.set_progress("tv:95396", 1, 3, NOW)
+    lib.add_to_list(lib.create_list("Shows"), "tv:95396")
+    assert [v["title"] for v in lib.continue_watching(date(2026, 9, 29))] == ["Severance"]
+    lib.set_hidden("tv:95396", True)
+    assert lib.continue_watching(date(2026, 9, 29)) == []
+    assert lib.watchlists(date(2026, 9, 29))["Shows"] == []
+    assert lib.data["items"]["tv:95396"]["progress"] == {"season": 1, "episode": 3}   # history kept
+    assert lib.view("tv:95396", date(2026, 9, 29))["hidden"] is True
+    lib.set_hidden("tv:95396", False)
+    assert len(lib.continue_watching(date(2026, 9, 29))) == 1
+
+
+def test_marking_a_running_show_up_to_date_is_caught_up_not_finished_and_resumes_when_a_new_episode_airs():
+    lib = make_lib()                                   # Severance: Returning Series, last aired S2E10
+    lib.mark_watched("tv:95396", True, NOW)
+    v = lib.view("tv:95396", date(2026, 9, 29))
+    assert v["status"] == "caught_up" and v["progress"] == "S2E10"
+    assert lib.data["items"]["tv:95396"]["watched"] is False
+    # a new episode airs (details refreshed from TMDB): it is "watching" again, next up S3E1
+    lib.data["items"]["tv:95396"]["details"]["seasons"][3] = 10
+    lib.data["items"]["tv:95396"]["details"]["last_aired"] = {"season": 3, "episode": 1}
+    v = lib.view("tv:95396", date(2026, 9, 29))
+    assert v["status"] == "watching" and v["next"] == "S3E1"
+    # an ended show that you are up to date on is finished
+    lib.data["items"]["tv:95396"]["details"]["status"] = "Ended"
+    lib.mark_watched("tv:95396", True, NOW)
+    assert lib.view("tv:95396", date(2026, 9, 29))["status"] == "finished"

@@ -57,6 +57,12 @@ TRAKT_SYNC_OVERLAP_DAYS = 3
 # On first connect only import this much history (not years of it).
 TRAKT_INITIAL_DAYS = 60
 TRAKT_SYNC_HOURS = 1
+# Services whose viewings TV Tracker sends to Trakt. Trakt's own streaming sync
+# already covers Netflix, Disney+, Prime Video and Apple TV, so sending those
+# too would create duplicate watches. Nothing is ever deleted from Trakt.
+TRAKT_PUSH_SERVICES = ("BBC iPlayer", "ITVX", "Channel 4", "Now TV")
+# Where a hidden show is hidden on Trakt.
+TRAKT_HIDE_SECTIONS = ("progress_watched", "calendar")
 
 SIGNAL_UPDATE = f"{DOMAIN}_update"
 STORAGE_KEY = f"{DOMAIN}.library"

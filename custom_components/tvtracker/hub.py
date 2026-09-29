@@ -21,6 +21,8 @@ from .const import (
     REFRESH_INTERVAL_HOURS,
     SIGNAL_UPDATE,
     STORAGE_KEY,
+    TRAKT_HIDE_SECTIONS,
+    TRAKT_PUSH_SERVICES,
     STORAGE_VERSION,
     TRAKT_INITIAL_DAYS,
     TRAKT_SYNC_HOURS,
@@ -30,9 +32,13 @@ from .library import Library, item_key
 from .logic import (
     MEDIA_SESSION_CMD,
     RoomTracker,
+    build_history_payload,
+    missing_aired_episodes,
     observe,
     parse_media_sessions,
     parse_trakt_history,
+    parse_trakt_watched_movies,
+    parse_trakt_watched_shows,
     response_timestamp,
 )
 from .tmdb import TMDB, TMDBError
@@ -55,6 +61,7 @@ class TVTrackerHub:
         self._connecting: dict[str, Any] | None = None
         self._connect_task: asyncio.Task | None = None
         self._trakt_lock = asyncio.Lock()
+        self._outbox_lock = asyncio.Lock()
         self._sleep = asyncio.sleep
         self.rooms = rooms
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -211,6 +218,8 @@ class TVTrackerHub:
         if session["category"] != "youtube" and lib.add_service(session["service"]):
             _LOGGER.info("Added new streaming service: %s", session["service"])
         item = lib.data["items"].get(key) if key else None
+        if key and session.get("_counted") and self.trakt:
+            self._queue_session_for_trakt(key, session)
         lib.add_history(
             {
                 "start": session["start"],
@@ -273,6 +282,7 @@ class TVTrackerHub:
         info: dict[str, Any] = {"last_sync": tokens.get("last_sync")}
         if tokens.get("last_result"):
             info["last_result"] = tokens["last_result"]
+        info["waiting_to_send"] = len(self.library.data.get("trakt_outbox") or [])
         if tokens.get("last_error"):
             info["last_error"] = tokens["last_error"]
         if self._connecting:
@@ -386,6 +396,7 @@ class TVTrackerHub:
         }
         if self.trakt is None or self.trakt_status != "connected":
             return result
+        await self._flush_outbox()
         async with self._trakt_lock:
             tokens = self.library.data["trakt"]
             now = dt_util.utcnow()
@@ -446,3 +457,135 @@ class TVTrackerHub:
 
     async def _scheduled_trakt(self, _now: datetime) -> None:
         await self.async_trakt_sync()
+
+    # ---- writing to Trakt: additions and hiding only, never deletions ------------
+    @property
+    def trakt_outbox(self) -> list[dict[str, Any]]:
+        return self.library.data.setdefault("trakt_outbox", [])
+
+    def _queue_session_for_trakt(self, key: str, session: dict[str, Any]) -> None:
+        """A finished viewing on a service Trakt doesn't sync itself, where we know
+        exactly what it was, is added to Trakt (Netflix/Disney+/Prime/Apple TV are
+        left to Trakt's own sync so nothing is duplicated)."""
+        if session["service"] not in TRAKT_PUSH_SERVICES:
+            return
+        item = self.library.data["items"][key]
+        when = session["end"].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        if item["media_type"] == "movie":
+            entry = {"media_type": "movie", "tmdb_id": item["tmdb_id"], "watched_at": when}
+        else:
+            progress = item.get("progress")
+            if not progress or item.get("progress_source") not in ("reported", "inferred"):
+                return  # we only counted it on; not sure enough to write to Trakt
+            entry = {
+                "media_type": "tv", "tmdb_id": item["tmdb_id"], "watched_at": when,
+                "season": progress["season"], "episode": progress["episode"],
+            }
+        if entry not in self.trakt_outbox:
+            self.trakt_outbox.append(entry)
+            self.hass.async_create_task(self._flush_outbox())
+
+    async def _flush_outbox(self) -> dict[str, Any]:
+        """Send everything queued for Trakt. Failures stay queued and are retried."""
+        result: dict[str, Any] = {"sent": 0, "queued": len(self.trakt_outbox)}
+        self.changed()  # the "waiting to send" count on the sensor
+        if self.trakt is None or self.trakt_status != "connected" or not self.trakt_outbox:
+            return result
+        async with self._outbox_lock:
+            batch = list(self.trakt_outbox)
+            try:
+                access = await self._trakt_access_token()
+                reply = await self.trakt.add_history(access, build_history_payload(batch))
+            except TraktAuthError as err:
+                self._trakt_lost_login(err)
+                result["error"] = str(err)
+                return result
+            except TraktError as err:
+                _LOGGER.warning("Trakt: could not send watches, will retry: %s", err)
+                result["error"] = str(err)
+                self.changed()
+                return result
+            self.library.data["trakt_outbox"] = [e for e in self.trakt_outbox if e not in batch]
+            result.update(sent=len(batch), queued=len(self.trakt_outbox), trakt_reply=reply.get("added"))
+            self.changed()
+        return result
+
+    def _trakt_lost_login(self, err: Exception) -> None:
+        tokens = self.library.data.get("trakt") or {}
+        self.library.data["trakt"] = {**tokens, "refresh_token": None, "last_error": str(err)}
+        self._notify("trakt", "Trakt disconnected", f"{err}. Run tvtracker.trakt_connect.")
+        self.changed()
+
+    async def async_trakt_mark_watched(self, key: str, dry_run: bool = False) -> dict[str, Any]:
+        """Add to Trakt every aired episode (or the film) it doesn't have a watch for.
+
+        Trakt is asked what you've already watched first, so nothing is watched
+        twice; new watches are dated to when each episode aired. Never deletes.
+        """
+        if self.trakt is None or self.trakt_status != "connected":
+            return {"status": self.trakt_status, "added": 0}
+        item = self.library.get_item(key)
+        try:
+            access = await self._trakt_access_token()
+            if item["media_type"] == "movie":
+                have = parse_trakt_watched_movies(await self.trakt.watched_movies(access))
+                todo = [] if item["tmdb_id"] in have else [{
+                    "media_type": "movie", "tmdb_id": item["tmdb_id"],
+                    "watched_at": dt_util.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")}]
+                already = 1 if item["tmdb_id"] in have else 0
+            else:
+                try:  # fresh episode counts (a new episode may have aired today)
+                    await self.fetch_item(item["media_type"], item["tmdb_id"])
+                except TMDBError:
+                    pass
+                have = parse_trakt_watched_shows(await self.trakt.watched_shows(access)).get(item["tmdb_id"], {})
+                missing = missing_aired_episodes(item["details"], have)
+                todo = [
+                    {"media_type": "tv", "tmdb_id": item["tmdb_id"], "season": s,
+                     "episode": e, "watched_at": "released"}
+                    for s, e in missing
+                ]
+                already = sum(len(v) for v in have.values())
+        except TraktAuthError as err:
+            self._trakt_lost_login(err)
+            return {"status": self.trakt_status, "added": 0, "error": str(err)}
+        except TraktError as err:
+            return {"status": self.trakt_status, "added": 0, "error": str(err)}
+
+        result: dict[str, Any] = {
+            "status": "connected",
+            "already_on_trakt": already,
+            "to_add": len(todo),
+            "episodes": [f"S{t['season']}E{t['episode']}" for t in todo][:60] if todo and item["media_type"] == "tv" else [],
+        }
+        if dry_run or not todo:
+            result["added"] = 0
+            result["dry_run"] = dry_run
+            return result
+        for entry in todo:
+            if entry not in self.trakt_outbox:
+                self.trakt_outbox.append(entry)
+        sent = await self._flush_outbox()
+        result["added"] = sent["sent"]
+        result["still_queued"] = sent["queued"]
+        if sent.get("error"):
+            result["error"] = sent["error"]
+        return result
+
+    async def async_trakt_hide(self, key: str, hidden: bool = True) -> dict[str, Any]:
+        """Hide (or un-hide) a show in Trakt's progress and calendar. History is untouched."""
+        item = self.library.get_item(key)
+        if self.trakt is None or self.trakt_status != "connected" or item["media_type"] != "tv":
+            return {"trakt": "skipped"}
+        body = {"shows": [{"ids": {"tmdb": item["tmdb_id"]}}]}
+        try:
+            access = await self._trakt_access_token()
+            for section in TRAKT_HIDE_SECTIONS:
+                call = self.trakt.hide if hidden else self.trakt.unhide
+                await call(access, section, body)
+        except TraktAuthError as err:
+            self._trakt_lost_login(err)
+            return {"trakt": "error", "error": str(err)}
+        except TraktError as err:
+            return {"trakt": "error", "error": str(err)}
+        return {"trakt": "hidden" if hidden else "shown"}

@@ -139,6 +139,10 @@ class Library:
             and (media_type is None or it["media_type"] == media_type)
         ]
 
+    def set_hidden(self, key: str, hidden: bool = True) -> None:
+        """Hide a show or film from the dashboard lists (its history is kept)."""
+        self.get_item(key)["hidden"] = bool(hidden)
+
     def add_to_list(self, list_ref: str, key: str) -> str:
         list_id = self.resolve_list(list_ref)
         item = self.get_item(key)
@@ -188,16 +192,23 @@ class Library:
     def mark_watched(
         self, key: str, watched: bool = True, when: datetime | str | None = None
     ) -> None:
-        """Movie: watched. TV: watched everything that has aired."""
+        """Movie: watched. TV: up to date, i.e. progress is the latest episode aired.
+
+        A show is never given a permanent "watched" flag: it stays *caught up*
+        while it is airing and becomes *watching* again when a new episode airs.
+        """
         item = self.get_item(key)
-        item["watched"] = watched
+        if item["media_type"] == "movie":
+            item["watched"] = watched
+            item["last_watched"] = (_iso(when) or item.get("last_watched")) if watched else None
+            return
         if watched:
+            item["watched"] = False
             item["last_watched"] = _iso(when) or item.get("last_watched")
             last = (item["details"] or {}).get("last_aired")
-            if item["media_type"] == "tv" and last:
+            if last:
                 item["progress"] = {"season": last["season"], "episode": last["episode"]}
-        elif item["media_type"] == "movie":
-            item["last_watched"] = None
+                item["progress_source"] = "manual"
 
     # ---- services --------------------------------------------------------
     def add_service(self, name: str) -> bool:
@@ -270,6 +281,7 @@ class Library:
         counts = fraction >= WATCHED_FRACTION if fraction is not None else seconds >= min_count_seconds
         if not counts:
             return key
+        session["_counted"] = True
         when = session["end"]
         if item["media_type"] == "movie":
             self.mark_watched(key, True, when)
@@ -391,6 +403,7 @@ class Library:
             "poster": details.get("poster"),
             "lists": [self.data["lists"][i]["name"] for i in item["lists"] if i in self.data["lists"]],
             "last_watched": item.get("last_watched"),
+            "hidden": bool(item.get("hidden")),
         }
 
     def watchlists(self, today: date) -> dict[str, list[dict[str, Any]]]:
@@ -398,6 +411,8 @@ class Library:
             lst["name"]: [] for lst in self.data["lists"].values()
         }
         for key, item in self.data["items"].items():
+            if item.get("hidden"):
+                continue
             for list_id in item["lists"]:
                 if list_id in self.data["lists"]:
                     out[self.data["lists"][list_id]["name"]].append(self.view(key, today))
@@ -408,7 +423,9 @@ class Library:
 
     def continue_watching(self, today: date) -> list[dict[str, Any]]:
         views = [self.view(k, today) for k in self.data["items"]]
-        started = [v for v in views if v["status"] in ("watching", "caught_up")]
+        started = [
+            v for v in views if v["status"] in ("watching", "caught_up") and not v["hidden"]
+        ]
         # Most recently watched first, then "watching" ahead of "caught up".
         started.sort(key=lambda v: v["last_watched"] or "", reverse=True)
         started.sort(key=lambda v: v["status"] != "watching")

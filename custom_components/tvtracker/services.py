@@ -139,9 +139,30 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def mark_watched(call: ServiceCall):
         hub = _hub(hass)
         item = await _resolve(hub, call.data)
-        hub.library.mark_watched(item["key"], call.data["watched"], dt_util.utcnow())
+        watched, dry_run = call.data["watched"], call.data["dry_run"]
+        connected = hub.trakt_status == "connected"
+        if dry_run:  # preview only: nothing changes in HA or on Trakt
+            plan = await hub.async_trakt_mark_watched(item["key"], dry_run=True) if connected else {"status": hub.trakt_status}
+            return {"dry_run": True, "trakt": plan}
+        hub.library.mark_watched(item["key"], watched, dt_util.utcnow())
         hub.changed()
-        return {"item": hub.library.view(item["key"], _today(hass))}
+        out: dict[str, Any] = {"item": hub.library.view(item["key"], _today(hass))}
+        if watched and call.data["trakt"] and connected:
+            out["trakt"] = await hub.async_trakt_mark_watched(item["key"])
+        elif not watched:
+            out["trakt"] = {"status": "unchanged", "note": "TV Tracker never removes anything from Trakt"}
+        return out
+
+    async def hide(call: ServiceCall):
+        hub = _hub(hass)
+        item = await _resolve(hub, call.data)
+        hidden = call.data["hidden"]
+        hub.library.set_hidden(item["key"], hidden)
+        out = {"item": item["title"], "hidden": hidden}
+        if call.data["trakt"]:
+            out.update(await hub.async_trakt_hide(item["key"], hidden))
+        hub.changed()
+        return out
 
     async def log_watch(call: ServiceCall):
         """Record a viewing that the TVs did not capture."""
@@ -246,7 +267,25 @@ def async_register_services(hass: HomeAssistant) -> None:
         set_progress,
         {vol.Required("season"): vol.Coerce(int), vol.Required("episode"): vol.Coerce(int), **TARGET},
     )
-    register("mark_watched", mark_watched, {vol.Optional("watched", default=True): cv.boolean, **TARGET})
+    register(
+        "mark_watched",
+        mark_watched,
+        {
+            vol.Optional("watched", default=True): cv.boolean,
+            vol.Optional("trakt", default=True): cv.boolean,
+            vol.Optional("dry_run", default=False): cv.boolean,
+            **TARGET,
+        },
+    )
+    register(
+        "hide",
+        hide,
+        {
+            vol.Optional("hidden", default=True): cv.boolean,
+            vol.Optional("trakt", default=True): cv.boolean,
+            **TARGET,
+        },
+    )
     register(
         "log_watch",
         log_watch,

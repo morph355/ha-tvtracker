@@ -122,3 +122,16 @@ def test_reported_episode_from_iplayer_style_session_updates_progress():
     assert lib.apply_session(sess, 600) == "tv:4242"
     item = lib.data["items"]["tv:4242"]
     assert item["progress"] == {"season": 1, "episode": 18} and item["progress_source"] == "reported"
+
+
+def test_now_tv_style_title_with_trailing_number_matches_a_show_but_not_a_movie():
+    lib = Library()
+    lib.upsert_item("tv", 1, {"title": "Last Week Tonight with John Oliver", "year": "2014",
+                              "seasons": {12: 30}, "first_air_date": "2014-04-27",
+                              "last_aired": {"season": 12, "episode": 24}}, {}, NOW)
+    lib.upsert_item("movie", 2, {"title": "Toy Story", "year": "1995", "release_date": "1995-11-22"}, {}, NOW)
+    base = {"room": "Bedroom", "category": "tv_movies", "service": "Now TV", "series_title": None,
+            "season": None, "episode": None, "channel": None,
+            "start": NOW, "end": NOW + timedelta(minutes=35)}
+    assert lib.match_session({**base, "title": "Last Week Tonight With John Oliver 24"}) == "tv:1"
+    assert lib.match_session({**base, "title": "Toy Story 4"}) is None

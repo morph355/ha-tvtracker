@@ -238,7 +238,10 @@ class Library:
         matches = [
             k
             for k, it in self.data["items"].items()
-            if match_score(it["title"], series, title)
+            if match_score(
+                it["title"], series, title,
+                allow_trailing_number=it["media_type"] == "tv",
+            )
         ]
         if not matches:
             return None

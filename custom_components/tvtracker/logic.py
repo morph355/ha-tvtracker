@@ -124,6 +124,9 @@ def classify(app_id: str | None, app_name: str | None) -> tuple[str | None, str 
     blob = norm(f"{app_id or ''} {app_name or ''}")
     if not blob:
         return None, None
+    # Now TV's Cast name is simply "NOW" (too short for a substring rule).
+    if norm(app_name) in ("now", "nowtv", "nowentertainment"):
+        return "tv_movies", "Now TV"
     for keyword, category, service in APP_RULES:
         if keyword in blob:
             return category, service
@@ -602,14 +605,27 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
 _COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
 
 
-def match_score(item_title: str, *candidates: str | None) -> bool:
-    """Does a reported playback title refer to this watchlist title?"""
+_TRAILING_NUMBER = re.compile(r"\s+\d{1,3}\s*$")
+
+
+def match_score(
+    item_title: str, *candidates: str | None, allow_trailing_number: bool = False
+) -> bool:
+    """Does a reported playback title refer to this watchlist title?
+
+    allow_trailing_number: TV apps like Now TV send "Show Name 24" (an episode
+    number on the end). Off for movies, where "Toy Story 4" is a different title.
+    """
     target = norm_title(item_title)
     if not target:
         return False
     for cand in candidates:
         if not cand:
             continue
+        if allow_trailing_number:
+            trimmed = _TRAILING_NUMBER.sub("", cand)
+            if trimmed != cand and match_score(item_title, trimmed):
+                return True
         if norm_title(cand) == target:
             return True
         # "Ghosts US" / "Ghosts (UK)" vs "Ghosts" (and the other way round)

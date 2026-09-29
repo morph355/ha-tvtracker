@@ -323,3 +323,24 @@ def test_match_score_country_suffix():
     assert logic.match_score("Ghosts US", None, "Ghosts")
     assert not logic.match_score("Ghosts", None, "Ghost")
     assert logic.match_score("Us", None, "Us")  # an exact title is unaffected by the suffix rule
+
+
+def test_now_tv_app_is_recognised():
+    """Real case: the Bedroom TV's Cast entity reports the app as just "NOW"."""
+    assert classify("AndroidNativeApp", "NOW") == ("tv_movies", "Now TV")
+    st = {"state": "playing", "attributes": {"app_id": "AndroidNativeApp", "app_name": "NOW",
+          "media_title": "Last Week Tonight With John Oliver 24", "media_duration": 2379}}
+    obs = observe([st])
+    assert (obs.service, obs.title) == ("Now TV", "Last Week Tonight With John Oliver 24")
+    # other, unrelated things still aren't mistaken for Now TV
+    assert classify("AndroidNativeApp", "LiveTV") == (None, None)
+    assert classify("com.snowplow.app", "Snow") != ("tv_movies", "Now TV")
+
+
+def test_match_score_trailing_episode_number_for_tv_only():
+    show = "Last Week Tonight with John Oliver"
+    assert logic.match_score(show, None, "Last Week Tonight With John Oliver 24", allow_trailing_number=True)
+    assert not logic.match_score(show, None, "Last Week Tonight With John Oliver 24")  # off by default
+    # a movie sequel must not match the original
+    assert not logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=False)
+    assert logic.match_score("Toy Story", None, "Toy Story 4", allow_trailing_number=True)  # only ever enabled for TV items

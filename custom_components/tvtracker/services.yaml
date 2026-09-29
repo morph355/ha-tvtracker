@@ -55,6 +55,16 @@ mark_watched:
     tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
     media_type: {selector: {select: {options: [tv, movie]}}}
 
+set_watch_service:
+  name: Set where it's watched
+  description: Say a show or film is (or isn't) on one of your services, when TMDB doesn't list it. Watching it on a service also records this automatically.
+  fields:
+    service: {required: true, example: "Now TV", selector: {text: {}}}
+    available: {default: true, selector: {boolean: {}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv, movie]}}}
+
 log_watch:
   name: Log a viewing
   description: Add a viewing the TVs didn't capture. Updates watch progress for shows and movies.

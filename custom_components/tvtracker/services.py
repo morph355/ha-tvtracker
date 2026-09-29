@@ -178,6 +178,16 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub.changed()
         return out
 
+    async def set_watch_service(call: ServiceCall):
+        hub = _hub(hass)
+        item = await _resolve(hub, call.data)
+        present = call.data["available"]
+        hub.library.set_watch_service(item["key"], call.data["service"], present)
+        if present:
+            hub.library.add_service(call.data["service"])
+        hub.changed()
+        return {"item": hub.library.view(item["key"], _today(hass))}
+
     async def log_watch(call: ServiceCall):
         """Record a viewing that the TVs did not capture."""
         hub, lib, data = _hub(hass), _hub(hass).library, call.data
@@ -220,6 +230,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 raise ServiceValidationError("Give both season and episode, or neither")
             if service:
                 lib.add_service(service)
+                lib.set_watch_service(item["key"], service)
             result["item"] = lib.view(item["key"], _today(hass))
             result["sent_to_trakt"] = hub.queue_manual_watch(item, data, service, end)
             if result["sent_to_trakt"]:
@@ -354,6 +365,15 @@ def async_register_services(hass: HomeAssistant) -> None:
         {
             vol.Optional("hidden", default=True): cv.boolean,
             vol.Optional("trakt", default=True): cv.boolean,
+            **TARGET,
+        },
+    )
+    register(
+        "set_watch_service",
+        set_watch_service,
+        {
+            vol.Required("service"): cv.string,
+            vol.Optional("available", default=True): cv.boolean,
             **TARGET,
         },
     )

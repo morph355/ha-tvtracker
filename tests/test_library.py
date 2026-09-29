@@ -86,6 +86,26 @@ def test_apply_session_marks_watchlist_items():
     assert lib.apply_session(session("Severance", category="youtube"), 600) is None
 
 
+def test_a_service_you_watch_it_on_counts_even_if_tmdb_does_not_list_it():
+    lib = make_lib()
+    assert lib.view("movie:1", TODAY)["on_my_services"] == ["Netflix"]
+    # told by hand
+    lib.set_watch_service("movie:1", "now tv")
+    assert lib.view("movie:1", TODAY)["on_my_services"] == ["Netflix", "Now TV"]
+    lib.set_watch_service("movie:1", "Now TV")  # idempotent
+    assert lib.data["items"]["movie:1"]["watch_on"] == ["Now TV"]
+    lib.set_watch_service("movie:1", "Now TV", present=False)
+    assert lib.view("movie:1", TODAY)["on_my_services"] == ["Netflix"]
+    # learned from watching (even a short viewing that doesn't count)
+    s = session("Dune", minutes=1)
+    s["service"] = "Now TV"
+    lib.apply_session(s, 600)
+    assert lib.view("movie:1", TODAY)["on_my_services"] == ["Netflix", "Now TV"]
+    # a service you haven't got isn't "yours"
+    lib.set_watch_service("movie:1", "Paramount+")
+    assert "Paramount+" not in lib.view("movie:1", TODAY)["on_my_services"]
+
+
 def test_views_and_continue_watching():
     lib = make_lib()
     lib.set_progress("tv:95396", 1, 3, NOW)

@@ -140,3 +140,22 @@ assign_match:
   fields:
     id: {default: latest, description: "The history entry's id, or 'latest'", selector: {text: {}}}
     show: {description: The show it really was; leave empty to use the show-search box, selector: {text: {}}}
+
+pick_match:
+  name: Choose which show it was
+  description: An episode title that fits several shows is offered as numbered options; choose one. It becomes certain, progress is set if you watched enough, and it is sent to Trakt on services Trakt doesn't sync.
+  fields:
+    choice: {required: true, description: The option number (1 is the likeliest), selector: {number: {min: 1, max: 9, mode: box}}}
+    id: {default: latest, description: "The history entry's id, or 'latest'", selector: {text: {}}}
+
+dismiss_match:
+  name: None of these / not right
+  description: Stop asking about a waiting viewing. It stays in the history untitled; a show that was only added because of a wrong guess is removed again.
+  fields:
+    id: {default: latest, description: "The history entry's id, or 'latest'", selector: {text: {}}}
+
+skip_match:
+  name: Ask me about this later
+  description: Move a waiting viewing behind the others.
+  fields:
+    id: {default: latest, description: "The history entry's id, or 'latest'", selector: {text: {}}}

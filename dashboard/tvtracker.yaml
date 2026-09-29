@@ -8,7 +8,9 @@ views:
     path: watching
     icon: mdi:television-play
     cards:
-      # Shown only when a viewing was matched by searching Trakt and is waiting for you.
+      # Shown only when a viewing is waiting for you: matched by searching Trakt ("probably"),
+      # or an episode title that fits several shows (numbered options). The buttons act on
+      # the FIRST one listed; "Ask me later" moves it to the back.
       - type: conditional
         conditions:
           - condition: numeric_state
@@ -21,17 +23,108 @@ views:
               title: Is this right?
               content: |-
                 {% for m in state_attr('sensor.tv_tracker_needs_confirming', 'matches') or [] -%}
+                {% if m.candidates -%}
+                - **“{{ m.title }}”** fits {{ m.candidates | length }} shows · {{ m.service or '?' }}{% if m.room %}, {{ m.room }}{% endif %}
+                {% for c in m.candidates %}   {{ loop.index }}. **{{ c.show }}**{% if c.year %} ({{ c.year }}){% endif %} S{{ c.season }}E{{ c.episode }}{% if c.hint %} — {{ c.hint }}{% endif %}
+                {% endfor -%}
+                {% else -%}
                 - **{{ m.title }}** S{{ m.season }}E{{ m.episode }}{% if m.episode_title %} — “{{ m.episode_title }}”{% endif %} *(probably)* · {{ m.service or '?' }}{% if m.room %}, {{ m.room }}{% endif %}
+                {% endif -%}
                 {% endfor %}
-                These buttons act on the **newest** one.
+                The buttons act on the **first** one.
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  attribute: choice_count
+                  below: 1
+              card:
+                type: button
+                name: Yes, that's right
+                icon: mdi:check-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.confirm_match
+                  data:
+                    id: latest
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  attribute: choice_count
+                  above: 0
+              card:
+                type: button
+                name: Choose 1
+                icon: mdi:numeric-1-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.pick_match
+                  data: {id: latest, choice: 1}
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  attribute: choice_count
+                  above: 1
+              card:
+                type: button
+                name: Choose 2
+                icon: mdi:numeric-2-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.pick_match
+                  data: {id: latest, choice: 2}
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  attribute: choice_count
+                  above: 2
+              card:
+                type: button
+                name: Choose 3
+                icon: mdi:numeric-3-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.pick_match
+                  data: {id: latest, choice: 3}
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  attribute: choice_count
+                  above: 3
+              card:
+                type: button
+                name: Choose 4
+                icon: mdi:numeric-4-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.pick_match
+                  data: {id: latest, choice: 4}
             - type: button
-              name: Yes, that's right
-              icon: mdi:check-circle-outline
+              name: None of these / not right
+              icon: mdi:close-circle-outline
               tap_action:
                 action: perform-action
-                perform_action: tvtracker.confirm_match
+                perform_action: tvtracker.dismiss_match
                 data:
                   id: latest
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.tv_tracker_needs_confirming
+                  above: 1
+              card:
+                type: button
+                name: Ask me about this later
+                icon: mdi:skip-next-circle-outline
+                tap_action:
+                  action: perform-action
+                  perform_action: tvtracker.skip_match
+                  data:
+                    id: latest
             - type: entities
               title: Wrong show? Type the right one
               entities:

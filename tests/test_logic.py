@@ -11,10 +11,12 @@ from tvt.logic import (
     next_episode,
     observe,
     parse_details,
+    describe_candidate,
     find_episode_by_title,
     infer_season,
     parse_episode_label,
     parse_media_sessions,
+    rank_episode_candidates,
     parse_providers,
 )
 
@@ -432,3 +434,32 @@ def test_find_episode_by_title():
     assert [(e["season"], e["episode"]) for e in find_episode_by_title(eps, "A Much Longer Episode Name (Part 1)")] == [(2, 2)]
     assert find_episode_by_title(eps, "Pilot: The Beginning") == []
     assert find_episode_by_title(eps, "") == [] and find_episode_by_title([], "x") == []
+
+
+def test_candidates_are_ranked_tracked_then_on_the_service_then_recent_then_runtime():
+    start = datetime(2026, 9, 29, 20, 0, tzinfo=timezone.utc)
+    mk = lambda name, tracked=False, on=False, aired=None, runtime=None: {
+        "show": name, "tracked": tracked, "on_service": on, "air_date": aired, "runtime": runtime}
+    cands = [
+        mk("Old Other", aired="2015-01-01", runtime=44),
+        mk("On The Service", on=True, aired="2015-01-01"),
+        mk("Tracked", tracked=True),
+        mk("Aired Last Week", aired="2026-09-22", runtime=90),
+        mk("Aired Last Week, Right Length", aired="2026-09-22", runtime=45),
+        mk("Aired Last Year", aired="2025-09-22", runtime=45),
+        mk("Aired Tomorrow (not yet)", aired="2026-09-30", runtime=45),
+    ]
+    order = [c["show"] for c in rank_episode_candidates(cands, start, 45.4)]
+    assert order[:3] == ["Tracked", "On The Service", "Aired Last Week, Right Length"]
+    assert order.index("Aired Last Week") < order.index("Aired Last Year")        # recent beats old
+    assert order.index("Aired Last Week") < order.index("Aired Tomorrow (not yet)")  # not yet aired isn't "recent"
+    assert rank_episode_candidates([], start, None) == []
+    # no start time or runtime known: still returns everything, stably
+    assert len(rank_episode_candidates(cands, None, None)) == 7
+
+
+def test_describe_candidate():
+    assert describe_candidate({"tracked": True, "air_date": "2026-09-27", "runtime": 45, "on_service": True}, "Now TV") \
+        == "you track it · aired 27 Sep · 45 min · on Now TV"
+    assert describe_candidate({"air_date": None, "runtime": None, "on_service": True}, None) == ""
+    assert describe_candidate({"air_date": "not a date"}, "Now TV") == ""

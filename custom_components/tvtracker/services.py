@@ -282,6 +282,16 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub = _hub(hass)
         return await hub.async_confirm_match(call.data["id"])
 
+    async def pick_match(call: ServiceCall):
+        hub = _hub(hass)
+        return await hub.async_pick_match(call.data["id"], call.data["choice"])
+
+    async def dismiss_match(call: ServiceCall):
+        return _hub(hass).async_dismiss_match(call.data["id"])
+
+    async def skip_match(call: ServiceCall):
+        return _hub(hass).async_skip_match(call.data["id"])
+
     async def assign_match(call: ServiceCall):
         hub = _hub(hass)
         # no show given: use whatever was typed into the dashboard's show-search box
@@ -366,6 +376,13 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
     register("find_episode", find_episode, {vol.Required("episode_title"): cv.string, **TARGET})
     register("confirm_match", confirm_match, {vol.Optional("id", default="latest"): cv.string})
+    register(
+        "pick_match",
+        pick_match,
+        {vol.Optional("id", default="latest"): cv.string, vol.Required("choice"): vol.All(vol.Coerce(int), vol.Range(min=1, max=9))},
+    )
+    register("dismiss_match", dismiss_match, {vol.Optional("id", default="latest"): cv.string})
+    register("skip_match", skip_match, {vol.Optional("id", default="latest"): cv.string})
     register(
         "assign_match",
         assign_match,

@@ -608,6 +608,46 @@ def parse_trakt_episode_search(results: list[dict[str, Any]] | None, title: str)
     return list(found.values())
 
 
+def rank_episode_candidates(
+    candidates: list[dict[str, Any]], viewing_start: datetime | None, viewing_minutes: float | None
+) -> list[dict[str, Any]]:
+    """Best guess first, for when one episode title matches several shows.
+
+    Order: shows you already track; shows available on the service you were
+    watching; an episode aired shortly before the viewing (a new episode is more
+    likely than an old one); then the closest runtime to what was played.
+    Each candidate needs: tracked, on_service, air_date (ISO or None), runtime (min or None).
+    """
+
+    def key(c: dict[str, Any]) -> tuple:
+        recent = False
+        if c.get("air_date") and viewing_start:
+            try:
+                days = (viewing_start.date() - date.fromisoformat(c["air_date"])).days
+                recent = 0 <= days <= 45
+            except ValueError:
+                pass
+        gap = abs(c["runtime"] - viewing_minutes) if c.get("runtime") and viewing_minutes else 999
+        return (not c.get("tracked"), not c.get("on_service"), not recent, gap)
+
+    return sorted(candidates, key=key)
+
+
+def describe_candidate(c: dict[str, Any], service: str | None) -> str:
+    """A short hint that makes the choice easy: 'you track it · aired 27 Sep · 45 min · on Now TV'."""
+    parts = []
+    if c.get("tracked"):
+        parts.append("you track it")
+    d = _parse_date(c.get("air_date"))
+    if d:
+        parts.append(f"aired {d.day} {d:%b}")
+    if c.get("runtime"):
+        parts.append(f"{c['runtime']} min")
+    if c.get("on_service") and service:
+        parts.append(f"on {service}")
+    return " · ".join(parts)
+
+
 def analyse_trakt_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
     """Read Trakt's own view of one show (GET /shows/:id/progress/watched).
 

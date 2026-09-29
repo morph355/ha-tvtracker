@@ -90,6 +90,7 @@ class TMDB:
                 "episode": int(e["episode_number"]),
                 "name": e.get("name") or "",
                 "air_date": e.get("air_date") or None,
+                "runtime": e.get("runtime") or None,
             }
             for e in data.get("episodes") or []
             if e.get("episode_number")

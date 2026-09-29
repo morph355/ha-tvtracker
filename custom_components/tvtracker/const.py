@@ -57,6 +57,10 @@ TRAKT_SYNC_OVERLAP_DAYS = 3
 # On first connect only import this much history (not years of it).
 TRAKT_INITIAL_DAYS = 60
 TRAKT_SYNC_HOURS = 1
+# When Trakt finds one episode title in several shows, this many are offered
+# (best first); more than MAX_SEARCH_HITS means the title is too generic to bother.
+MAX_CANDIDATES = 4
+MAX_SEARCH_HITS = 8
 # Services whose viewings TV Tracker sends to Trakt. Trakt's own streaming sync
 # already covers Netflix, Disney+, Prime Video and Apple TV, so sending those
 # too would create duplicate watches. Nothing is ever deleted from Trakt.

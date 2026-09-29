@@ -2,14 +2,12 @@ from datetime import date, datetime, timedelta, timezone
 
 from tvt.library import Library
 from tvt.logic import (
-    aired_episodes,
+    analyse_trakt_progress,
     build_history_payload,
-    missing_aired_episodes,
     parse_details,
     parse_providers,
     parse_trakt_history,
     parse_trakt_watched_movies,
-    parse_trakt_watched_shows,
 )
 from test_logic import RAW_TV
 
@@ -106,22 +104,19 @@ def test_attach_history_title_matches_service_and_day_once():
     assert not lib.attach_history_title("tv:95396", {**ev, "watched_at": "garbage"})
 
 
-def test_aired_and_missing_episodes():
-    d = {"seasons": {1: 3, 2: 4, 3: 5}, "last_aired": {"season": 2, "episode": 2}}
-    assert aired_episodes(d) == [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2)]   # nothing after S2E2
-    assert aired_episodes({"seasons": {1: 3}}) == []                        # unknown: never guess
-    assert missing_aired_episodes(d, {1: {1, 2, 3}, 2: {1}}) == [(2, 2)]
-    assert missing_aired_episodes(d, None) == aired_episodes(d)
-    assert missing_aired_episodes(d, {1: {1, 2, 3}, 2: {1, 2}, 9: {1}}) == []
+def test_analyse_trakt_progress_uses_trakts_own_numbering():
+    progress = {"aired": 6, "completed": 4, "seasons": [
+        {"number": 0, "episodes": [{"number": 1, "completed": False}]},                       # specials: ignored
+        {"number": 1, "episodes": [{"number": 1, "completed": True}, {"number": 2, "completed": True}]},
+        {"number": 2, "episodes": [{"number": 1, "completed": True}, {"number": 2, "completed": True},
+                                   {"number": 3, "completed": False}, {"number": 4, "completed": False}]}]}
+    info = analyse_trakt_progress(progress)
+    assert info == {"aired": 6, "completed": 4, "missing": [(2, 3), (2, 4)], "last_completed": (2, 2)}
+    assert analyse_trakt_progress(None) == {"aired": 0, "completed": 0, "missing": [], "last_completed": None}
+    assert analyse_trakt_progress({"seasons": []})["missing"] == []
 
 
-def test_parse_trakt_watched():
-    shows = parse_trakt_watched_shows([
-        {"show": {"ids": {"tmdb": 5}}, "seasons": [{"number": 1, "episodes": [{"number": 1}, {"number": 2}]},
-                                                     {"number": 2, "episodes": [{"number": 1}]}]},
-        {"show": {"ids": {"trakt": 9}}, "seasons": []},                     # no tmdb id: ignored
-    ])
-    assert shows == {5: {1: {1, 2}, 2: {1}}}
+def test_parse_trakt_watched_movies():
     assert parse_trakt_watched_movies([{"movie": {"ids": {"tmdb": 7}}}, {"movie": {"ids": {}}}]) == {7}
 
 
@@ -140,6 +135,14 @@ def test_build_history_payload_is_additions_only_and_grouped():
         "movies": [{"ids": {"tmdb": 7}, "watched_at": "2026-09-29T21:00:00.000Z"}],
     }
     assert build_history_payload([]) == {}
+
+    # entries pinned to a Trakt show id use it (Trakt's own numbering), not the TMDB id
+    pinned = [
+        {"media_type": "tv", "tmdb_id": 5, "ids": {"trakt": 777}, "season": 11, "episode": 15, "watched_at": "released"},
+        {"media_type": "tv", "tmdb_id": 5, "ids": {"trakt": 777}, "season": 11, "episode": 16, "watched_at": "released"},
+    ]
+    assert build_history_payload(pinned) == {"shows": [{"ids": {"trakt": 777}, "seasons": [
+        {"number": 11, "episodes": [{"number": 15, "watched_at": "released"}, {"number": 16, "watched_at": "released"}]}]}]}
 
 
 def test_hidden_items_are_left_out_of_lists_but_kept():

@@ -157,9 +157,35 @@ class TraktClient:
             raise TraktError(f"Trakt refused {path} (HTTP {status})")
         return data if isinstance(data, dict) else {}
 
-    async def watched_shows(self, token: str) -> list[dict[str, Any]]:
-        """Every show you have watched, with the episodes watched (for de-duplicating)."""
-        return await self._get_list("/sync/watched/shows", token)
+    async def _get_object(self, path: str, token: str, params: dict[str, Any] | None = None) -> Any:
+        status, body = await self._request("GET", path, token=token, params=params)
+        if status in (401, 403):
+            raise TraktAuthError("Trakt rejected the access token")
+        if status == 404:
+            return None
+        if status != 200:
+            raise TraktError(f"Could not read {path} (HTTP {status})")
+        return body
+
+    async def find_show(self, token: str, tmdb_id: int) -> int | None:
+        """Trakt's own id for a show, from its TMDB id (None if Trakt doesn't know it)."""
+        found = await self._get_object(f"/search/tmdb/{int(tmdb_id)}", token, {"type": "show"})
+        for hit in found or []:
+            trakt_id = ((hit.get("show") or {}).get("ids") or {}).get("trakt")
+            if trakt_id:
+                return int(trakt_id)
+        return None
+
+    async def show_progress(self, token: str, trakt_id: int) -> dict[str, Any]:
+        """Trakt's own record of which episodes of a show you've completed."""
+        data = await self._get_object(
+            f"/shows/{int(trakt_id)}/progress/watched",
+            token,
+            {"hidden": "false", "specials": "false"},
+        )
+        if not isinstance(data, dict):
+            raise TraktError(f"Trakt has no progress for show {trakt_id}")
+        return data
 
     async def watched_movies(self, token: str) -> list[dict[str, Any]]:
         return await self._get_list("/sync/watched/movies", token)

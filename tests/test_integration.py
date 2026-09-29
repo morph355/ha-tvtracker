@@ -447,9 +447,13 @@ async def test_trakt_connect_sync_and_dedupe(hass, setup_trakt, fake_trakt, free
     # the movie was recorded as watched (it isn't "continue watching", so check the item directly)
     assert hub.library.view("movie:438631", dt_util_date())["status"] == "finished"
 
+    # the sync reports what Trakt returned, so "nothing imported" can be explained
+    last = hass.states.get("sensor.tv_tracker_trakt").attributes["last_result"]
+    assert last["fetched"] == 3 and last["without_tmdb_id"] == 0 and last["applied"] == 3
     # syncing again applies nothing new, even though Trakt returns the same rows...
     res = await call(hass, "trakt_sync")
     assert res["applied"] == 0 and res["status"] == "connected"
+    assert (res["fetched"], res["already_applied"]) == (3, 3)
     # ...and the next sync starts a few days before the last one (late, date-only syncs)
     # (start_at is last_sync minus the overlap, so it is later than the first sync's 60-day window
     # but earlier than "now")
@@ -578,3 +582,19 @@ def dt_util_now_iso():
 def dt_util_date():
     from homeassistant.util import dt as dt_util
     return dt_util.now().date()
+
+
+async def test_trakt_sync_explains_an_empty_import(hass, setup_trakt, fake_trakt):
+    """The failure the user hit: connected, nothing imported. Say why."""
+    # Trakt returns items we can't use (no TMDB id) plus an unrelated type
+    unusable = _trakt_ep(31, None, "No Id Show", 1, 1, dt_util_now_iso())
+    fake_trakt["history"] = [unusable, {"id": 32, "type": "season", "watched_at": dt_util_now_iso()}]
+    await call(hass, "trakt_connect")
+    await hass.async_block_till_done()
+    res = await call(hass, "trakt_sync")
+    assert (res["fetched"], res["without_tmdb_id"], res["applied"]) == (2, 2, 0)
+    # and when Trakt itself has nothing:
+    fake_trakt["history"] = []
+    res = await call(hass, "trakt_sync")
+    assert (res["fetched"], res["without_tmdb_id"], res["applied"]) == (0, 0, 0)
+    assert hass.states.get("sensor.tv_tracker_trakt").attributes["last_result"]["fetched"] == 0

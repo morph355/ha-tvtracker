@@ -266,6 +266,8 @@ class TVTrackerHub:
     def trakt_info(self) -> dict[str, Any]:
         tokens = self.library.data.get("trakt") or {}
         info: dict[str, Any] = {"last_sync": tokens.get("last_sync")}
+        if tokens.get("last_result"):
+            info["last_result"] = tokens["last_result"]
         if tokens.get("last_error"):
             info["last_error"] = tokens["last_error"]
         if self._connecting:
@@ -368,7 +370,15 @@ class TVTrackerHub:
 
     async def async_trakt_sync(self) -> dict[str, Any]:
         """Pull new watches from Trakt and apply them to the library."""
-        result = {"status": self.trakt_status, "applied": 0, "new_items": 0, "titled_history": 0}
+        result: dict[str, Any] = {
+            "status": self.trakt_status,
+            "fetched": 0,            # watches Trakt returned
+            "without_tmdb_id": 0,    # ...that we can't use (no TMDB id / not an episode or movie)
+            "already_applied": 0,    # ...seen on an earlier sync
+            "applied": 0,
+            "new_items": 0,
+            "titled_history": 0,
+        }
         if self.trakt is None or self.trakt_status != "connected":
             return result
         async with self._trakt_lock:
@@ -382,9 +392,12 @@ class TVTrackerHub:
                     )
                 else:
                     since = now - timedelta(days=TRAKT_INITIAL_DAYS)
-                events = parse_trakt_history(
-                    await self.trakt.history(access, since.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
-                )
+                since_text = since.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                raw = await self.trakt.history(access, since_text)
+                events = parse_trakt_history(raw)
+                result["fetched"] = len(raw)
+                result["without_tmdb_id"] = len(raw) - len(events)
+                result["since"] = since_text
             except TraktAuthError as err:
                 self.library.data["trakt"] = {**tokens, "refresh_token": None, "last_error": str(err)}
                 self._notify("trakt", "Trakt disconnected", f"{err}. Run tvtracker.trakt_connect.")
@@ -402,6 +415,7 @@ class TVTrackerHub:
             seen: list = list(tokens.get("seen", []))
             for ev in events:
                 if ev["trakt_id"] in seen:
+                    result["already_applied"] += 1
                     continue
                 key = item_key(ev["media_type"], ev["tmdb_id"])
                 if key not in self.library.data["items"]:
@@ -416,7 +430,12 @@ class TVTrackerHub:
                     result["titled_history"] += 1
                 seen.append(ev["trakt_id"])
                 result["applied"] += 1
-            tokens.update(seen=seen[-3000:], last_sync=now.isoformat(), last_error=None)
+            tokens.update(
+                seen=seen[-3000:],
+                last_sync=now.isoformat(),
+                last_error=None,
+                last_result={k: v for k, v in result.items() if k != "status"},
+            )
             self.changed()
         return result
 

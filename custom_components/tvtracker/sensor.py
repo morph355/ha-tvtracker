@@ -168,9 +168,18 @@ class NeedsConfirmingSensor(_Base):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        pending = self._hub.pending_matches()
         return {
+            # how many options the viewing at the front of the queue has (drives which buttons show)
+            "choice_count": len((pending[0].get("candidates") or [])) if pending else 0,
             "matches": [
-                {k: h.get(k) for k in ("id", "title", "season", "episode", "episode_title", "service", "room", "start")}
-                for h in self._hub.pending_matches()
-            ]
+                {
+                    **{k: h.get(k) for k in ("id", "title", "season", "episode", "episode_title", "service", "room", "start", "skips")},
+                    "candidates": [
+                        {k: c.get(k) for k in ("show", "year", "season", "episode", "name", "hint")}
+                        for c in (h.get("candidates") or [])
+                    ],
+                }
+                for h in pending
+            ],
         }

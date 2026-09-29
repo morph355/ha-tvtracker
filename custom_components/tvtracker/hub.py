@@ -17,6 +17,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ADB_POLL_SECONDS,
+    MAX_CANDIDATES,
+    MAX_SEARCH_HITS,
     MIN_COUNT_SECONDS,
     MIN_SESSION_SECONDS,
     REFRESH_INTERVAL_HOURS,
@@ -28,6 +30,7 @@ from .const import (
     TRAKT_INITIAL_DAYS,
     TRAKT_SYNC_HOURS,
     TRAKT_SYNC_OVERLAP_DAYS,
+    WATCHED_FRACTION,
 )
 from .library import Library, item_key
 from .logic import (
@@ -35,6 +38,9 @@ from .logic import (
     RoomTracker,
     analyse_trakt_progress,
     build_history_payload,
+    canonical_service,
+    describe_candidate,
+    rank_episode_candidates,
     MIN_EPISODE_SEARCH_CHARS,
     find_episode_by_title,
     norm,
@@ -239,11 +245,17 @@ class TVTrackerHub:
     async def _find_episode_on_trakt(self, session: dict[str, Any]) -> None:
         """Nothing you track has this episode: ask Trakt which show it belongs to.
 
-        Only a single exact match is used, the show is added to the library, and
-        the viewing is labelled 'probably' and NOT sent to Trakt until confirmed.
+        One exact match is used (show added, viewing labelled 'probably'). Several
+        become numbered options for you to choose from; nothing is added anywhere
+        until you do. Neither is sent to Trakt until confirmed.
         """
         hits = await self.search_trakt_episodes(session["title"])
-        if len(hits) != 1:
+        if not hits or len(hits) > MAX_SEARCH_HITS:
+            return
+        if len(hits) > 1:
+            session["_candidates"] = await self._rank_candidates(hits, session)
+            _LOGGER.info("%s could be any of %d shows; waiting for you to choose", session["title"], len(hits))
+            self.changed()
             return
         hit = hits[0]
         key = item_key("tv", hit["tmdb_id"])
@@ -255,6 +267,31 @@ class TVTrackerHub:
         )
         _LOGGER.info("Probably %s S%sE%s (found via Trakt search)", hit["show"], hit["season"], hit["episode"])
         self.changed()
+
+    async def _rank_candidates(self, hits: list[dict[str, Any]], session: dict[str, Any]) -> list[dict[str, Any]]:
+        """Add what helps you choose (do you track it, is it on this service, when it
+        aired, how long it is), then put the likeliest first. Nothing is stored in the library."""
+        service = session["service"]
+        minutes = (session.get("duration_ms") or 0) / 60000 or None
+        out: list[dict[str, Any]] = []
+        for hit in hits:
+            existing = self.library.data["items"].get(item_key("tv", hit["tmdb_id"]))
+            cand = {**hit, "tracked": bool(existing and (existing["lists"] or existing.get("progress"))),
+                    "on_service": False, "air_date": None, "runtime": None}
+            try:
+                _, providers = await self.tmdb.details("tv", hit["tmdb_id"])
+                names = {canonical_service(n) for k in ("flatrate", "ads", "free") for n in providers.get(k, [])}
+                cand["on_service"] = service in names
+                for ep in await self.tmdb.season_episodes(hit["tmdb_id"], hit["season"]):
+                    if ep["episode"] == hit["episode"]:
+                        cand["air_date"], cand["runtime"] = ep["air_date"], ep.get("runtime")
+            except TMDBError:
+                pass  # keep the option, just without the extra hints
+            out.append(cand)
+        ranked = rank_episode_candidates(out, session.get("start"), minutes)[:MAX_CANDIDATES]
+        for cand in ranked:
+            cand["hint"] = describe_candidate(cand, service)
+        return ranked
 
     async def episode_names(self, item: dict[str, Any], seasons: Any = None) -> list[dict[str, Any]]:
         """Episode names for a show, fetched from TMDB and cached on the item.
@@ -333,6 +370,14 @@ class TVTrackerHub:
             return
         lib = self.library
         key = lib.apply_session(session, MIN_COUNT_SECONDS)
+        if key is None and session.get("_candidates"):
+            # Several shows might be the one: nothing is applied yet, but work out now
+            # whether enough was watched, so choosing later can set progress.
+            fraction = lib.watched_fraction(session, {"media_type": "tv", "details": {}}, seconds)
+            session["_fraction"] = fraction
+            session["_counted"] = (
+                fraction >= WATCHED_FRACTION if fraction is not None else seconds >= MIN_COUNT_SECONDS
+            )
         if session["category"] != "youtube" and lib.add_service(session["service"]):
             _LOGGER.info("Added new streaming service: %s", session["service"])
         item = lib.data["items"].get(key) if key else None
@@ -355,7 +400,8 @@ class TVTrackerHub:
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),
                 "item_key": key,
-                "probable": bool(session.get("_found")) and key is not None,
+                "probable": (bool(session.get("_found")) and key is not None) or bool(session.get("_candidates")),
+                "candidates": session.get("_candidates"),
                 "counted": bool(session.get("_counted")),
                 "watched_pct": (
                     round(session["_fraction"] * 100)
@@ -725,11 +771,14 @@ class TVTrackerHub:
         return result
 
     def pending_matches(self) -> list[dict[str, Any]]:
-        """Viewings labelled 'probably' that are waiting for you, newest first."""
-        return [h for h in reversed(self.library.data["history"]) if h.get("probable")]
+        """Viewings waiting for you (a 'probably', or several options), newest first.
+        One you skipped goes behind those you haven't."""
+        rows = [h for h in reversed(self.library.data["history"]) if h.get("probable")]
+        rows.sort(key=lambda h: h.get("skips", 0))
+        return rows
 
     def _pending_entry(self, entry_id: str) -> dict[str, Any]:
-        """A history entry by id, or "latest" for the newest one waiting for you."""
+        """A history entry by id, or "latest" for the one at the front of the queue."""
         if entry_id == "latest":
             pending = self.pending_matches()
             if not pending:
@@ -758,6 +807,9 @@ class TVTrackerHub:
         if it is on a service Trakt doesn't sync itself and was watched enough."""
         lib = self.library
         entry = self._pending_entry(entry_id)
+        if entry.get("candidates"):
+            n = len(entry["candidates"])
+            raise ValueError(f"That title fits {n} shows. Choose one (1 to {n}), or type the right show")
         entry["probable"] = False
         item = lib.data["items"].get(entry.get("item_key") or "")
         result: dict[str, Any] = {"title": entry.get("title"), "season": entry.get("season"),
@@ -777,7 +829,6 @@ class TVTrackerHub:
         names); the wrongly guessed show's progress is undone, and if it was only
         added because of the guess it is removed again.
         """
-        lib = self.library
         entry = self._pending_entry(entry_id)
         show = (show or "").strip()
         if not show:
@@ -799,26 +850,67 @@ class TVTrackerHub:
             raise ValueError(f"No single episode of {item['title']} is called '{name}'")
         hit = hits[0]
 
+        return await self._make_certain(entry, item, hit["season"], hit["episode"], hit["name"])
+
+    def _undo_guess(self, entry: dict[str, Any], keep: dict[str, Any] | None = None) -> None:
+        """Take back the progress a wrong guess set; a show that was only added because
+        of the guess (on no list) is removed again."""
+        lib = self.library
         old = lib.data["items"].get(entry.get("item_key") or "")
-        if old is not None and old is not item and old.get("progress_source") == "found" and old.get(
-            "progress"
-        ) == {"season": entry.get("season"), "episode": entry.get("episode")}:
+        if (
+            old is not None and old is not keep and old.get("progress_source") == "found"
+            and old.get("progress") == {"season": entry.get("season"), "episode": entry.get("episode")}
+        ):
             old["progress"], old["progress_source"] = None, None
             if not old["lists"]:
-                del lib.data["items"][old["key"]]          # only ever added because of the guess
-        entry.update(
-            title=item["title"], item_key=item["key"], season=hit["season"], episode=hit["episode"],
-            episode_title=hit["name"], probable=False,
-        )
+                del lib.data["items"][old["key"]]
+
+    async def _make_certain(self, entry: dict[str, Any], item: dict[str, Any], season: int, episode: int, name: str) -> dict[str, Any]:
+        """You decided which show/episode it was: record it as certain, set progress if it
+        was watched enough, and send it to Trakt where that applies."""
+        self._undo_guess(entry, keep=item)
+        entry.update(title=item["title"], item_key=item["key"], season=season, episode=episode,
+                     episode_title=name, probable=False, candidates=None)
         if entry.get("counted"):
-            lib.set_progress(item["key"], hit["season"], hit["episode"], entry["end"],
-                             only_forward=True, source="reported")
+            self.library.set_progress(item["key"], season, episode, entry["end"], only_forward=True, source="reported")
         sent = self._send_confirmed(entry, item)
         if sent:
             await self._flush_outbox()
         self.changed()
-        return {"title": item["title"], "season": hit["season"], "episode": hit["episode"],
-                "episode_title": hit["name"], "sent_to_trakt": sent and self.trakt_status == "connected"}
+        return {"title": item["title"], "season": season, "episode": episode, "episode_title": name,
+                "sent_to_trakt": sent and self.trakt_status == "connected"}
+
+    async def async_pick_match(self, entry_id: str, choice: int) -> dict[str, Any]:
+        """Choose one of the offered shows for a viewing that fitted several."""
+        entry = self._pending_entry(entry_id)
+        options = entry.get("candidates") or []
+        if not options:
+            raise ValueError("This viewing has no options to choose from; use confirm, or type the show")
+        if not 1 <= choice <= len(options):
+            raise ValueError(f"Choose a number from 1 to {len(options)}")
+        pick = options[choice - 1]
+        try:
+            item = await self.fetch_item("tv", pick["tmdb_id"])
+        except TMDBError as err:
+            raise ValueError(f"Could not look that show up: {err}") from err
+        return await self._make_certain(entry, item, pick["season"], pick["episode"], pick["name"])
+
+    def async_dismiss_match(self, entry_id: str) -> dict[str, Any]:
+        """Not any of these / the guess is wrong: stop asking. The viewing stays in the
+        history untitled, and a guessed show that was only added for it is removed."""
+        entry = self._pending_entry(entry_id)
+        self._undo_guess(entry)
+        entry.update(probable=False, candidates=None, item_key=None, season=None, episode=None, episode_title=None)
+        self.changed()
+        return {"dismissed": entry.get("title")}
+
+    def async_skip_match(self, entry_id: str) -> dict[str, Any]:
+        """Deal with it later: it goes behind the other viewings that are waiting."""
+        entry = self._pending_entry(entry_id)
+        entry["skips"] = entry.get("skips", 0) + 1
+        self.changed()
+        nxt = self.pending_matches()[0]
+        return {"skipped": entry.get("title"), "now_first": nxt.get("title")}
 
     async def async_trakt_hide(self, key: str, hidden: bool = True) -> dict[str, Any]:
         """Hide (or un-hide) a show in Trakt's progress and calendar. History is untouched."""

@@ -67,11 +67,16 @@ def fake_tmdb(monkeypatch):
         if path == "/tv/95350":
             return {**RAW_LANTERNS}
         if path == "/tv/95350/season/1":
-            return {"episodes": [{"episode_number": n, "name": name, "air_date": d} for n, name, d in LANTERNS_S1]}
+            return {"episodes": [{"episode_number": n, "name": name, "air_date": d, "runtime": 45} for n, name, d in LANTERNS_S1]}
         if re.fullmatch(r"/tv/\d+/season/\d+", path):   # any other show: episodes with dull names
             season = int(path.rsplit("/", 1)[1])
-            return {"episodes": [{"episode_number": n, "name": f"Episode {season}.{n}", "air_date": "2020-01-01"}
-                                 for n in range(1, 4)]}
+            return {"episodes": [{"episode_number": n, "name": f"Episode {season}.{n}", "air_date": "2020-01-01",
+                                  "runtime": 30} for n in range(1, 4)]}
+        if re.fullmatch(r"/tv/\d+", path):               # any other show: a quiet old series, on no service
+            return {"name": f"Show {path.rsplit('/', 1)[1]}", "first_air_date": "2019-01-01", "status": "Ended",
+                    "seasons": [{"season_number": 1, "episode_count": 3}, {"season_number": 2, "episode_count": 3}],
+                    "last_episode_to_air": {"season_number": 2, "episode_number": 3},
+                    "watch/providers": {"results": {"GB": {"flatrate": []}}}}
         if path == "/movie/438631":
             return {"title": "Dune", "release_date": "2021-10-01", "runtime": 155,
                     "watch/providers": {"results": {"GB": {"flatrate": [{"provider_name": "Netflix"}]}}}}
@@ -1057,12 +1062,14 @@ async def test_the_trakt_episode_search_is_not_trusted_when_unsure(hass, setup_t
     hub = setup_trakt
     await _connect(hass, hub)
 
-    # two different shows have an episode with this name: no guess
+    # two different shows have an episode with this name: no guess, but both are offered as options
     fake_trakt["episode_search"] = [trakt_episode_hit("Lanterns", 95350, 1, 3, JORDAN),
                                     trakt_episode_hit("Another Show", 111, 2, 9, JORDAN)]
     await _now_tv_watch(hass, freezer, JORDAN)
-    assert "tv:95350" not in hub.library.data["items"] and hub.library.data["history"][-1]["item_key"] is None
-    assert hub.library.data["history"][-1].get("probable") is False
+    h = hub.library.data["history"][-1]
+    assert "tv:95350" not in hub.library.data["items"] and "tv:111" not in hub.library.data["items"]
+    assert h["item_key"] is None and h["probable"] is True and len(h["candidates"]) == 2
+    assert fake_trakt["added"] == []
 
     # a search result whose title is only *similar* is ignored
     fake_trakt["episode_search"] = [trakt_episode_hit("Lanterns", 95350, 1, 3, "The Jordan Boys Legacy Reloaded")]
@@ -1133,9 +1140,10 @@ async def test_the_confirm_button_acts_on_the_latest_match_and_the_card_only_sho
     assert card["type"] == "conditional" and card["conditions"][0]["entity"] == "sensor.tv_tracker_needs_confirming"
     shown = Template(card["card"]["cards"][0]["content"], hass).async_render(parse_result=False)
     assert "**Lanterns** S1E3" in shown and "(probably)" in shown and "Now TV, Bedroom" in shown
-    buttons = [c for c in card["card"]["cards"] if c["type"] == "button"]
-    assert [b["tap_action"]["perform_action"] for b in buttons] == ["tvtracker.confirm_match", "tvtracker.assign_match"]
-    assert all(b["tap_action"]["data"] == {"id": "latest"} for b in buttons)
+    actions = _dashboard_actions(card)
+    assert actions["tvtracker.confirm_match"] == [{"id": "latest"}]
+    assert actions["tvtracker.pick_match"] == [{"id": "latest", "choice": n} for n in (1, 2, 3, 4)]
+    assert set(actions) >= {"tvtracker.dismiss_match", "tvtracker.skip_match", "tvtracker.assign_match"}
 
     res = await call(hass, "confirm_match")                        # no id: what the dashboard button sends is "latest"
     assert res["sent_to_trakt"] is True and len(fake_trakt["added"]) == 1
@@ -1238,3 +1246,150 @@ async def test_an_episode_you_log_yourself_is_sent_to_trakt_only_on_services_tra
 async def test_a_manual_log_is_not_sent_when_trakt_is_not_set_up(hass, setup):
     res = await call(hass, "log_watch", title="Lanterns", season=1, episode=2, service="Now TV")
     assert res["item"]["progress"] == "S1E2" and res["sent_to_trakt"] is False
+
+
+def _dashboard_actions(card):
+    """{service: [data, ...]} for every button in a (possibly nested) dashboard card."""
+    out = {}
+
+    def walk(c):
+        act = c.get("tap_action") or {}
+        if c.get("type") == "button" and act.get("action") == "perform-action":
+            out.setdefault(act["perform_action"], []).append(act.get("data"))
+        for inner in c.get("cards", []) + ([c["card"]] if "card" in c else []):
+            walk(inner)
+
+    walk(card)
+    return out
+
+
+
+OTHER_SHOW = ("Another Show", 111, 2, 2)      # (title, tmdb id, season, episode): also has an episode with this title
+
+
+async def _two_shows_fit(hass, hub, fake_trakt, freezer, minutes=40, title=JORDAN, order=None):
+    """Trakt finds the title in two shows (listed with the *unlikely* one first); watch it."""
+    await _connect(hass, hub)
+    lanterns = trakt_episode_hit("Lanterns", 95350, 1, 3, title)
+    other = trakt_episode_hit(OTHER_SHOW[0], OTHER_SHOW[1], OTHER_SHOW[2], OTHER_SHOW[3], title)
+    fake_trakt["episode_search"] = order or [other, lanterns]
+    await _now_tv_watch(hass, freezer, title, minutes)
+
+
+async def test_a_title_that_fits_several_shows_is_offered_as_ranked_options_and_nothing_is_applied(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer)
+    h = hub.library.data["history"][-1]
+    assert h["item_key"] is None and h["probable"] is True and h["counted"] is True
+    first, second = h["candidates"]
+    assert (first["show"], second["show"]) == ("Lanterns", "Another Show")       # ranked, not in Trakt's order
+    assert first["on_service"] is True and second["on_service"] is False
+    assert first["hint"] == "aired 15 Aug · 45 min · on Now TV"                   # what makes the choice easy
+    assert not hub.library.data["items"].get("tv:95350") and not hub.library.data["items"].get("tv:111")
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+
+    sensor = hass.states.get("sensor.tv_tracker_needs_confirming")
+    assert sensor.state == "1" and sensor.attributes["choice_count"] == 2
+    (m,) = sensor.attributes["matches"]
+    assert [c["show"] for c in m["candidates"]] == ["Lanterns", "Another Show"] and m["candidates"][0]["hint"]
+
+    with pytest.raises(ServiceValidationError, match="fits 2 shows"):             # can't just say "yes"
+        await call(hass, "confirm_match")
+    import voluptuous as vol
+    with pytest.raises(vol.Invalid):                                                # 0 is not a valid option number
+        await call(hass, "pick_match", choice=0)
+    with pytest.raises(ServiceValidationError, match="1 to 2"):                     # 3 doesn't exist for this viewing
+        await call(hass, "pick_match", choice=3)
+
+
+async def test_choosing_an_option_makes_it_certain_and_only_then_is_anything_added_or_sent(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer)
+    res = await call(hass, "pick_match", choice=1)                                  # the id defaults to "latest"
+    assert (res["title"], res["season"], res["episode"], res["sent_to_trakt"]) == ("Lanterns", 1, 3, True)
+    item = hub.library.data["items"]["tv:95350"]
+    assert item["progress"] == {"season": 1, "episode": 3} and item["progress_source"] == "reported"
+    assert "tv:111" not in hub.library.data["items"]                               # the other option never touched
+    h = hub.library.data["history"][-1]
+    assert (h["title"], h["item_key"], h["probable"], h["candidates"]) == ("Lanterns", "tv:95350", False, None)
+    (payload,) = fake_trakt["added"]
+    assert payload["shows"][0]["ids"] == {"tmdb": 95350}
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "0"
+
+
+async def test_choosing_the_second_option_uses_that_show(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer)
+    await call(hass, "pick_match", choice=2)
+    assert hub.library.data["items"]["tv:111"]["progress"] == {"season": 2, "episode": 2}
+    assert "tv:95350" not in hub.library.data["items"]
+    assert fake_trakt["added"][0]["shows"][0]["ids"] == {"tmdb": 111}
+
+
+async def test_a_viewing_that_was_not_watched_enough_is_not_counted_when_you_choose_later(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer, minutes=3)                # 3 of 45 minutes
+    h = hub.library.data["history"][-1]
+    assert h["counted"] is False and h["watched_pct"] < 20
+    res = await call(hass, "pick_match", choice=1)
+    assert res["sent_to_trakt"] is False and fake_trakt["added"] == []
+    assert hub.library.data["items"]["tv:95350"]["progress"] is None              # chosen, but not watched enough to count
+
+
+async def test_none_of_these_stops_asking_and_adds_nothing(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer)
+    res = await call(hass, "dismiss_match")
+    assert res["dismissed"] == JORDAN
+    h = hub.library.data["history"][-1]
+    assert (h["probable"], h["candidates"], h["item_key"]) == (False, None, None) and h["title"] == JORDAN
+    assert not hub.library.data["items"].get("tv:95350") and fake_trakt["added"] == []
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "0"
+    with pytest.raises(ServiceValidationError):
+        await call(hass, "dismiss_match")
+
+
+async def test_dismissing_a_wrong_single_guess_takes_the_guess_back(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["episode_search"] = [trakt_episode_hit("Welcome to Wrexham", 1234, 1, 1, JORDAN)]
+    await _now_tv_watch(hass, freezer, JORDAN)
+    assert hub.library.data["items"]["tv:1234"]["progress"] == {"season": 1, "episode": 1}
+    await call(hass, "dismiss_match")
+    assert "tv:1234" not in hub.library.data["items"]                              # only existed because of the guess
+    assert hub.library.data["history"][-1]["item_key"] is None and fake_trakt["added"] == []
+
+
+async def test_skipping_moves_a_viewing_behind_the_others(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer, title=JORDAN)
+    second = "Another Long Episode Title"
+    fake_trakt["episode_search"] = [trakt_episode_hit("Lanterns", 95350, 1, 2, second),
+                                    trakt_episode_hit(OTHER_SHOW[0], OTHER_SHOW[1], 1, 1, second)]
+    await _now_tv_watch(hass, freezer, second, 40)                                     # a second one waits
+    titles = lambda: [m["title"] for m in hass.states.get("sensor.tv_tracker_needs_confirming").attributes["matches"]]
+    assert titles() == ["Another Long Episode Title", JORDAN]                        # newest first
+    res = await call(hass, "skip_match")
+    assert res["now_first"] == JORDAN and titles() == [JORDAN, "Another Long Episode Title"]
+    await call(hass, "skip_match")                                                   # skipping again brings it back
+    assert titles() == ["Another Long Episode Title", JORDAN]
+    # the buttons act on whichever is first: choose for it, and the other is next
+    await call(hass, "pick_match", choice=1)
+    assert titles() == [JORDAN]
+
+
+async def test_a_title_that_fits_too_many_shows_is_left_alone(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["episode_search"] = [trakt_episode_hit(f"Show {n}", 500 + n, 1, 1, JORDAN) for n in range(9)]
+    await _now_tv_watch(hass, freezer, JORDAN)
+    h = hub.library.data["history"][-1]
+    assert h["probable"] is False and h["candidates"] is None and h["item_key"] is None
+
+
+async def test_typing_the_right_show_also_works_for_a_viewing_with_options(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _two_shows_fit(hass, hub, fake_trakt, freezer)
+    res = await call(hass, "assign_match", show="Lanterns")
+    assert (res["title"], res["episode"]) == ("Lanterns", 3)
+    assert hub.library.data["history"][-1]["candidates"] is None and len(fake_trakt["added"]) == 1

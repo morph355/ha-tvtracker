@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TV Tracker",
+        "description": "Create a free account at themoviedb.org, then Settings > API, and paste your API key (v3 key or v4 read token) here.",
+        "data": {
+          "tmdb_api_key": "TMDB API key",
+          "region": "Country code for 'where to watch' (e.g. GB)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "TMDB rejected that API key.",
+      "cannot_connect": "Could not reach TMDB."
+    },
+    "abort": {
+      "already_configured": "TV Tracker is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Rooms",
+        "description": "Each room lists the media_player entities that belong to one TV, e.g. a SHIELD's Google Cast entity (titles) and its Android TV entity (app).",
+        "data": {"rooms": "Rooms"}
+      }
+    }
+  }
+}

@@ -158,6 +158,29 @@ class Observation:
     channel: str | None = None
     position_ms: int | None = None
     subtitle: str | None = None
+    duration_ms: int | None = None
+    playing: bool | None = None
+    position_at: datetime | None = None  # when position_ms was true (for extrapolating)
+
+
+def _ms(seconds: Any, allow_zero: bool = False) -> int | None:
+    """Seconds (float) from a media_player attribute -> whole milliseconds."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or (value == 0 and not allow_zero):
+        return None
+    return int(value * 1000)
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _as_int(value: Any) -> int | None:
@@ -272,6 +295,10 @@ def observe(
         obs.episode = _as_int(attrs.get("media_episode"))
         if chosen[0] == "youtube":
             obs.channel = attrs.get("media_artist")
+        obs.duration_ms = _ms(attrs.get("media_duration"))
+        obs.position_ms = _ms(attrs.get("media_position"), allow_zero=True)
+        obs.playing = st.get("state") == "playing"
+        obs.position_at = _as_datetime(attrs.get("media_position_updated_at"))
         break
 
     if obs.service == "Now TV" and obs.title and obs.season is None:
@@ -295,7 +322,10 @@ def observe(
             ):
                 if obs.title is None:
                     obs.title = sess["title"]
+                # The media session's position is fresher than Cast's.
                 obs.position_ms = sess["position_ms"]
+                obs.position_at = None
+                obs.playing = sess["state"] == SESSION_PLAYING
                 # The subtitle often carries "Series 1: 18. Episode name" (iPlayer).
                 # Only trust it for the same programme the entities named.
                 if norm_title(sess["title"]) == norm_title(obs.title) and obs.season is None:
@@ -333,12 +363,39 @@ class RoomTracker:
             "subtitle": obs.subtitle,
             "start": now,
             "end": None,
-            "_last_pos": obs.position_ms,
+            "duration_ms": obs.duration_ms,
+            "_last_pos": self._position_now(obs, now),
+            "_pos_time": now,
+            "_playing": bool(obs.playing),
         }
 
     @staticmethod
-    def _next_episode_started(cur: dict[str, Any], obs: Observation) -> bool:
-        last, pos = cur.get("_last_pos"), obs.position_ms
+    def _position_now(obs: Observation, now: datetime) -> int | None:
+        """The playback position at `now`. Cast only reports the position when it
+        changes, so while playing it is wound forward from when it was true."""
+        pos = obs.position_ms
+        if pos is None:
+            return None
+        if obs.playing and obs.position_at is not None:
+            try:
+                pos += int(max(0.0, (now - obs.position_at).total_seconds()) * 1000)
+            except TypeError:  # naive vs aware datetimes: leave it as reported
+                pass
+        return pos
+
+    @staticmethod
+    def _finalise(cur: dict[str, Any], now: datetime) -> None:
+        """Work out how far through the programme you had got when it ended."""
+        pos = cur.get("_last_pos")
+        if pos is not None and cur.get("_playing") and cur.get("_pos_time") is not None:
+            pos += int(max(0.0, (now - cur["_pos_time"]).total_seconds()) * 1000)
+        dur = cur.get("duration_ms")
+        if pos is not None and dur:
+            pos = min(pos, dur)
+        cur["final_pos_ms"] = pos
+
+    def _next_episode_started(self, cur: dict[str, Any], obs: Observation, now: datetime) -> bool:
+        last, pos = cur.get("_last_pos"), self._position_now(obs, now)
         return (
             cur["category"] == "tv_movies"
             and last is not None
@@ -358,11 +415,15 @@ class RoomTracker:
                 and obs.service == cur["service"]
                 and (obs.title == cur["title"] or obs.title is None or cur["title"] is None)
             )
-            if same and obs is not None and self._next_episode_started(cur, obs):
+            if same and obs is not None and self._next_episode_started(cur, obs, now):
                 same = False
             if same and obs is not None:
                 if obs.position_ms is not None:
-                    cur["_last_pos"] = obs.position_ms
+                    cur["_last_pos"] = self._position_now(obs, now)
+                    cur["_pos_time"] = now
+                    cur["_playing"] = bool(obs.playing)
+                if obs.duration_ms:
+                    cur["duration_ms"] = obs.duration_ms
                 if cur.get("season") is None and obs.season is not None:
                     cur.update(season=obs.season, episode=obs.episode, subtitle=obs.subtitle)
                 if cur["title"] is None and obs.title:
@@ -375,6 +436,7 @@ class RoomTracker:
                         subtitle=obs.subtitle,
                     )
                 return closed
+            self._finalise(cur, now)
             cur["end"] = now
             closed.append(cur)
             self.current = None
@@ -434,7 +496,9 @@ def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         }
         last = raw.get("last_episode_to_air") or {}
         nxt = raw.get("next_episode_to_air") or {}
+        runtimes = raw.get("episode_run_time") or []
         details.update(
+            episode_runtime=last.get("runtime") or (runtimes[0] if runtimes else None),
             seasons=seasons,
             last_aired=(
                 {"season": last["season_number"], "episode": last["episode_number"]}

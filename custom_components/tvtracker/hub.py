@@ -228,6 +228,11 @@ class TVTrackerHub:
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),
                 "item_key": key,
+                "watched_pct": (
+                    round(session["_fraction"] * 100)
+                    if session.get("_fraction") is not None
+                    else None
+                ),
                 "source": "auto",
             }
         )

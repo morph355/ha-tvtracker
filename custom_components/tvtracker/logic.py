@@ -818,9 +818,12 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
     details = item.get("details") or {}
     mine = {canonical_service(s) for s in my_services}
 
+    # Services you've watched it on (or told us) count even if TMDB doesn't list them.
     streaming = [
-        n for kind in ("flatrate", "ads", "free") for n in providers.get(kind, [])
-    ]
+        n
+        for kind in ("flatrate", "ads", "free")
+        for n in providers.get(kind, [])
+    ] + [canonical_service(s) for s in item.get("watch_on") or []]
     streaming = list(dict.fromkeys(streaming))
     on_mine = [n for n in streaming if n in mine]
     elsewhere = [n for n in streaming if n not in mine]

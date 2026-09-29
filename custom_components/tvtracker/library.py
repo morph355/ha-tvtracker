@@ -143,6 +143,17 @@ class Library:
         """Hide a show or film from the dashboard lists (its history is kept)."""
         self.get_item(key)["hidden"] = bool(hidden)
 
+    def set_watch_service(self, key: str, service: str, present: bool = True) -> None:
+        """Record (or forget) a service this title is watched on, whatever TMDB says."""
+        item = self.get_item(key)
+        name = canonical_service(service)
+        current = [canonical_service(s) for s in item.get("watch_on") or []]
+        if present and name not in current:
+            current.append(name)
+        elif not present:
+            current = [s for s in current if s != name]
+        item["watch_on"] = current
+
     def add_to_list(self, list_ref: str, key: str) -> str:
         list_id = self.resolve_list(list_ref)
         item = self.get_item(key)
@@ -274,7 +285,9 @@ class Library:
         key = self.match_session(session)
         if key is None:
             return None
-        seconds = (session["end"] - session["start"]).total_seconds()
+        if session.get("service"):
+            self.set_watch_service(key, session["service"])
+        seconds =(session["end"] - session["start"]).total_seconds()
         item = self.data["items"][key]
         fraction = self.watched_fraction(session, item, seconds)
         session["_fraction"] = fraction

@@ -201,3 +201,14 @@ class TraktClient:
     async def unhide(self, token: str, section: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Un-hide (removes the *hide*, never any history)."""
         return await self._post(f"/users/hidden/{section}/remove", token, payload)
+
+    async def search_episodes(self, query: str, token: str | None = None) -> list[dict[str, Any]]:
+        """Trakt's search across every show's episode titles (TMDB can't do this)."""
+        status, body = await self._request(
+            "GET", "/search/episode", token=token, params={"query": query, "limit": 10}
+        )
+        if status in (401, 403) and token:
+            raise TraktAuthError("Trakt rejected the access token")
+        if status != 200 or not isinstance(body, list):
+            raise TraktError(f"Trakt episode search failed (HTTP {status})")
+        return body

@@ -250,6 +250,17 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def find_episode(call: ServiceCall):
         hub = _hub(hass)
+        if not call.data.get("title") and not call.data.get("tmdb_id"):
+            # no show given: ask Trakt which shows have an episode with this title
+            try:
+                matches = await hub.search_trakt_episodes(call.data["episode_title"])
+            except TraktError as err:
+                raise HomeAssistantError(str(err)) from err
+            if hub.trakt is None:
+                raise ServiceValidationError("Searching without a show needs Trakt set up")
+            if not matches:
+                raise ServiceValidationError("No show on Trakt has an episode with exactly that title")
+            return {"matches": matches[:5]}
         item = await _resolve(hub, call.data)
         if item["media_type"] != "tv":
             raise ServiceValidationError(f"{item['title']} is a film, not a series")
@@ -257,6 +268,10 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub.changed()
         return {"show": item["title"], "tmdb_id": item["tmdb_id"], **hit,
                 "aired": bool(hit["air_date"] and hit["air_date"] <= _today(hass).isoformat())}
+
+    async def confirm_match(call: ServiceCall):
+        hub = _hub(hass)
+        return await hub.async_confirm_match(call.data["id"])
 
     async def trakt_connect(call: ServiceCall):
         hub = _hub(hass)
@@ -336,6 +351,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         },
     )
     register("find_episode", find_episode, {vol.Required("episode_title"): cv.string, **TARGET})
+    register("confirm_match", confirm_match, {vol.Required("id"): cv.string})
     register("delete_history", delete_history, {vol.Required("id"): cv.string})
     register("add_service", add_service, {vol.Required("name"): cv.string})
     register("remove_service", remove_service, {vol.Required("name"): cv.string})

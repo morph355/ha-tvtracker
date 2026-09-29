@@ -73,7 +73,8 @@ Everything is a Home Assistant service (Developer tools → Actions), so it work
 | `tvtracker.search` | Find a show/movie on TMDB (returns `tmdb_id`s). |
 | `tvtracker.create_list` / `delete_list` | Manage watchlists. |
 | `tvtracker.add_to_list` / `remove_from_list` | By `title` (or `tmdb_id` + `media_type`). The list is created if missing. |
-| `tvtracker.find_episode` | Which season/episode of a show has a given name (e.g. Now TV only sends the episode's title). |
+| `tvtracker.find_episode` | Which season/episode of a show has a given name (e.g. Now TV only sends the episode's title); leave the show out to search all of Trakt. |
+| `tvtracker.confirm_match` | Make a *(probably)* viewing certain, and send it to Trakt (iPlayer/Now TV/ITVX/Channel 4). |
 | `tvtracker.log_watch` | Add a viewing the TVs missed. Updates progress / marks movies watched. |
 | `tvtracker.set_progress` | "We're up to S2E4." |
 | `tvtracker.mark_watched` | Movie watched, or show up to date (also adds the missing episodes to Trakt; try `dry_run: true` first). |
@@ -109,6 +110,7 @@ If a title matches more than one thing (e.g. a TV show and a movie with the same
 
 - Titles depend on what each app publishes. YouTube (Cast) gives video + channel; Disney+ gives the title through ADB; other apps (Netflix, iPlayer…) are untested and may publish nothing, in which case the session is logged without a title. Fill those in with `log_watch`.
 - **Now TV** puts the episode number on the end of the title ("Show Name 24") but no season; the season is inferred from where you are in the show (marked `inferred`, and Trakt corrects it). **BBC iPlayer** publishes "Series 1: 18. Episode name" through ADB, which gives both. Without ADB on a TV, iPlayer gives only the show name via Cast.
+- When a title matches no show, and Trakt is set up, Trakt is searched for an episode with **exactly** that title (TMDB can't search episode names). A single, distinctive (8+ characters) match is used: the show is added to your library, the viewing is labelled *(probably)*, and it is **not sent to Trakt** until you confirm it with `tvtracker.confirm_match` (give the history entry's `id`). `tvtracker.find_episode` with no show does the same search on demand.
 - When a title matches no show, it is looked up among the *episode names* of the shows you track (lists or in progress), so Now TV's "The Jordan Boys' Legacy" is recognised as an episode of Lanterns. `log_watch` also accepts `episode_title` instead of season/episode.
 - Apps publish a title but not season/episode numbers, so watching a show on the watchlist advances it by one episode per viewing. Back-to-back episodes (autoplay) are detected when the playback position jumps back to the start after most of an episode was played. Correct it any time with `set_progress`.
 - Availability comes from TMDB/JustWatch for the configured country and can lag reality.

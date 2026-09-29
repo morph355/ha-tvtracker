@@ -34,9 +34,12 @@ from .logic import (
     RoomTracker,
     analyse_trakt_progress,
     build_history_payload,
+    MIN_EPISODE_SEARCH_CHARS,
     find_episode_by_title,
+    norm,
     observe,
     parse_media_sessions,
+    parse_trakt_episode_search,
     parse_trakt_history,
     parse_trakt_watched_movies,
     response_timestamp,
@@ -193,8 +196,39 @@ class TVTrackerHub:
                     _LOGGER.info("Recognised %s as %s S%sE%s", title, item["title"], hit["season"], hit["episode"])
                     self.changed()
                     return
-        except TMDBError as err:
+            await self._find_episode_on_trakt(session)
+        except (TMDBError, TraktError) as err:
             _LOGGER.debug("Episode lookup for %s failed: %s", title, err)
+
+    async def search_trakt_episodes(self, title: str) -> list[dict[str, Any]]:
+        """Episodes anywhere on Trakt with exactly this title (needs Trakt set up)."""
+        if self.trakt is None or len(norm(title)) < MIN_EPISODE_SEARCH_CHARS:
+            return []
+        try:
+            token = await self._trakt_access_token() if self.trakt_status == "connected" else None
+        except TraktError:
+            token = None
+        return parse_trakt_episode_search(await self.trakt.search_episodes(title, token), title)
+
+    async def _find_episode_on_trakt(self, session: dict[str, Any]) -> None:
+        """Nothing you track has this episode: ask Trakt which show it belongs to.
+
+        Only a single exact match is used, the show is added to the library, and
+        the viewing is labelled 'probably' and NOT sent to Trakt until confirmed.
+        """
+        hits = await self.search_trakt_episodes(session["title"])
+        if len(hits) != 1:
+            return
+        hit = hits[0]
+        key = item_key("tv", hit["tmdb_id"])
+        if key not in self.library.data["items"]:
+            await self.fetch_item("tv", hit["tmdb_id"])
+        session.update(
+            series_title=self.library.data["items"][key]["title"], season=hit["season"],
+            episode=hit["episode"], subtitle=hit["name"], _found=True,
+        )
+        _LOGGER.info("Probably %s S%sE%s (found via Trakt search)", hit["show"], hit["season"], hit["episode"])
+        self.changed()
 
     async def episode_names(self, item: dict[str, Any], seasons: Any = None) -> list[dict[str, Any]]:
         """Episode names for a show, fetched from TMDB and cached on the item.
@@ -295,6 +329,8 @@ class TVTrackerHub:
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),
                 "item_key": key,
+                "probable": bool(session.get("_found")) and key is not None,
+                "counted": bool(session.get("_counted")),
                 "watched_pct": (
                     round(session["_fraction"] * 100)
                     if session.get("_fraction") is not None
@@ -640,6 +676,32 @@ class TVTrackerHub:
         result["still_queued"] = sent["queued"]
         if sent.get("error"):
             result["error"] = sent["error"]
+        return result
+
+    async def async_confirm_match(self, entry_id: str) -> dict[str, Any]:
+        """You've confirmed a 'probably' viewing: make it certain, and send it to Trakt
+        if it is on a service Trakt doesn't sync itself and was watched enough."""
+        lib = self.library
+        entry = next((h for h in lib.data["history"] if h["id"] == entry_id), None)
+        if entry is None:
+            raise ValueError("No such history entry")
+        if not entry.get("probable"):
+            raise ValueError("That viewing isn't waiting for confirmation")
+        entry["probable"] = False
+        item = lib.data["items"].get(entry.get("item_key") or "")
+        result: dict[str, Any] = {"title": entry.get("title"), "season": entry.get("season"),
+                                  "episode": entry.get("episode"), "sent_to_trakt": False}
+        if item and item.get("progress") == {"season": entry.get("season"), "episode": entry.get("episode")}:
+            item["progress_source"] = "reported"
+        if item and entry.get("counted") and self.trakt and entry.get("service") in TRAKT_PUSH_SERVICES:
+            end = datetime.fromisoformat(entry["end"]).astimezone(dt_util.UTC)
+            new = {"media_type": "tv", "tmdb_id": item["tmdb_id"], "season": entry["season"],
+                   "episode": entry["episode"], "watched_at": end.strftime("%Y-%m-%dT%H:%M:%S.000Z")}
+            if new not in self.trakt_outbox:
+                self.trakt_outbox.append(new)
+            await self._flush_outbox()
+            result["sent_to_trakt"] = self.trakt_status == "connected"
+        self.changed()
         return result
 
     async def async_trakt_hide(self, key: str, hidden: bool = True) -> dict[str, Any]:

@@ -147,9 +147,20 @@ def _as_int(value: Any) -> int | None:
         return None
 
 # Android media sessions (from `dumpsys media_session`, via the ADB integration)
+# The trailing timestamp makes every answer different. The ADB entity keeps the
+# previous `adb_response` when a command prints nothing (e.g. the session has
+# ended), so without it a stale title would look current.
 MEDIA_SESSION_CMD = (
-    "dumpsys media_session | grep -E 'package=|metadata:|state=PlaybackState'"
+    "dumpsys media_session | grep -E 'package=|metadata:|state=PlaybackState'; "
+    "echo tvt_ts=$(date +%s%N)"
 )
+_TS_RE = re.compile(r"tvt_ts=(\d+)")
+
+
+def response_timestamp(text: str | None) -> str | None:
+    """The freshness marker MEDIA_SESSION_CMD appends, or None if absent."""
+    m = _TS_RE.search(text or "")
+    return m.group(1) if m else None
 SESSION_PAUSED, SESSION_PLAYING, SESSION_BUFFERING = 2, 3, 6
 _SESSION_RE = re.compile(r"package=(?P<pkg>\S+)(?P<body>.*?)(?=\n\s*package=|\Z)", re.S)
 

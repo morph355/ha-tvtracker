@@ -240,10 +240,14 @@ async def test_adb_media_session_gives_disney_title_and_tracks_episodes(hass, se
     from homeassistant.core import ServiceCall
 
     ADB = "media_player.android_tv_192_168_3_131"
-    box = {"pos": 5_000, "state": 3}
+    box = {"pos": 5_000, "state": 3, "n": 0, "silent": False}
 
     async def fake_adb(call: ServiceCall):
+        if box["silent"]:  # the real entity keeps its previous adb_response
+            return
+        box["n"] += 1
         text = ADB_TEXT.replace("state=3, position=234528", f"state={box['state']}, position={box['pos']}")
+        text += f"\ntvt_ts={box['n']}"
         cur = hass.states.get(ADB)
         hass.states.async_set(ADB, cur.state, {**cur.attributes, "adb_response": text})
 
@@ -296,3 +300,34 @@ async def test_adb_media_session_gives_disney_title_and_tracks_episodes(hass, se
     titles = [h["title"] for h in lib["recent_history"]]
     assert titles.count("Welcome to Wrexham") == 2 and not any("Sasquatch" in (t or "") for t in titles)
     assert wrex["on_my_services"] == ["Disney+"]
+
+
+async def test_stale_adb_response_is_not_trusted(hass, setup, freezer):
+    """If a poll produces no fresh answer, an old title must not linger."""
+    from homeassistant.core import ServiceCall
+
+    ADB = "media_player.android_tv_192_168_3_131"
+    stale = ADB_TEXT + "\ntvt_ts=1"
+
+    async def silent_adb(call: ServiceCall):
+        return  # leaves the previous adb_response in place, like the real entity
+
+    hass.services.async_register("androidtv", "adb_command", silent_adb)
+    hass.states.async_set("media_player.shield_2", "on",
+        {"app_id": "com.disney.disneyplus", "app_name": "com.disney.disneyplus"})
+    hass.states.async_set(ADB, "playing",
+        {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": stale})
+    await hass.async_block_till_done()
+    hub = hass.data[DOMAIN][setup.entry_id]
+    # The first answer (unseen timestamp) is trusted and names the show...
+    assert hass.states.get("sensor.tv_tracker_now_watching_living_room").state == "Welcome to Wrexham"
+    # ...but the same (old) timestamp again -> not fresh -> its sessions are discarded
+    hass.states.async_set(ADB, "paused",
+        {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": stale})
+    await hass.async_block_till_done()
+    assert hub._sessions["Living Room"] == []
+    # ...and a response with no timestamp at all is never trusted either
+    hass.states.async_set(ADB, "playing",
+        {"app_id": "com.disney.disneyplus", "app_name": "Disney+", "adb_response": ADB_TEXT})
+    await hass.async_block_till_done()
+    assert hub._sessions["Living Room"] == []

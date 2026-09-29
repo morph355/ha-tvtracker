@@ -22,7 +22,13 @@ from .const import (
     STORAGE_VERSION,
 )
 from .library import Library
-from .logic import MEDIA_SESSION_CMD, RoomTracker, observe, parse_media_sessions
+from .logic import (
+    MEDIA_SESSION_CMD,
+    RoomTracker,
+    observe,
+    parse_media_sessions,
+    response_timestamp,
+)
 from .tmdb import TMDB, TMDBError
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +49,7 @@ class TVTrackerHub:
         self.trackers = {r["name"]: RoomTracker(r["name"]) for r in rooms}
         self._sessions: dict[str, list[dict[str, Any]]] = {}
         self._polling: set[str] = set()
+        self._last_ts: dict[str, str] = {}
         self._unsubs: list[Any] = []
 
     # ---- lifecycle -------------------------------------------------------
@@ -151,7 +158,13 @@ class TVTrackerHub:
             )
             st = self.hass.states.get(entity_id)
             text = st.attributes.get("adb_response") if st else None
-            self._sessions[room] = parse_media_sessions(text)
+            stamp = response_timestamp(text)
+            if stamp is None or stamp == self._last_ts.get(room):
+                # No fresh answer: don't trust an old one.
+                self._sessions[room] = []
+            else:
+                self._last_ts[room] = stamp
+                self._sessions[room] = parse_media_sessions(text)
             self._evaluate(room)
         except Exception as err:  # noqa: BLE001 - never let a poll break tracking
             _LOGGER.debug("ADB poll for %s failed: %s", room, err)

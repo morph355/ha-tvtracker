@@ -966,10 +966,10 @@ async def test_an_unrecognised_title_is_left_alone_and_lookups_are_not_repeated(
         return await orig(tmdb_id, season)
 
     hub.tmdb.season_episodes = counting
-    for _ in range(3):   # the same programme reported again and again
+    for i in range(3):   # the same programme reported again and again (position differs, so each is a real update)
         hass.states.async_set(room, "playing", {
             "app_id": "AndroidNativeApp", "app_name": "NOW", "media_title": "A Film Nobody Tracks",
-            "media_duration": 5000.0, "media_position": 1.0,
+            "media_duration": 5000.0, "media_position": 1.0 + 60 * i,
             "media_position_updated_at": dt_util.utcnow().isoformat()})
         await hass.async_block_till_done()
     assert hass.states.get("sensor.tv_tracker_now_watching_bedroom").state == "A Film Nobody Tracks"

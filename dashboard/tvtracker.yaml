@@ -155,7 +155,7 @@ views:
       - type: markdown
         title: Up next — available to watch
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'available') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'available') | list -%}
           {% if rows | length == 0 -%}
           Nothing waiting.
           {% endif -%}
@@ -165,7 +165,7 @@ views:
       - type: markdown
         title: Up next — coming soon
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'coming_soon') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'coming_soon') | list -%}
           {% if rows | length == 0 -%}
           Nothing scheduled.
           {% endif -%}
@@ -176,7 +176,7 @@ views:
       - type: markdown
         title: Up next — finished
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'finished') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'finished') | list -%}
           {% if rows | length == 0 -%}
           Nothing finished lately.
           {% endif -%}

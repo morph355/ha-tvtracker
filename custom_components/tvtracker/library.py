@@ -472,7 +472,8 @@ class Library:
         recent = (today - timedelta(days=FINISHED_SHOWN_DAYS)).isoformat()
         started = [
             v for v in views
-            if not v["hidden"] and (
+            # shows only, for now: films don't have an "up next"
+            if v["type"] == "tv" and not v["hidden"] and (
                 v["status"] in ("watching", "caught_up")
                 # a finished show stays a while, under "Finished"
                 or (v["status"] == "finished" and (v["last_watched"] or "") >= recent)

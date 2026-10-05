@@ -279,7 +279,7 @@ async def test_dashboard_templates_render(hass, setup, freezer):
     assert "**Family Room** — off" in out["Watching / Now watching"]
     assert "**Severance** — next **S1E4** · on Apple TV" in out["Watching / Up next — available to watch"]
     assert "**Ghosts** — season 2 announced, no date yet" in out["Watching / Up next — coming soon"]
-    assert "Nothing to catch up on" in out["Catch up / Unwatched episodes"]
+    assert "Choose a show above" in out["Catch up / Unwatched episodes"]
     assert "### Shows" in out["Watchlists / Watchlists"] and "### Movies" in out["Watchlists / Watchlists"]
     assert "Dune" in out["Watchlists / Watchlists"] and "Watch on Netflix" in out["Watchlists / Watchlists"]
     assert "Severance" in out["TV & Movies / Recently watched"] and "S1E3" in out["TV & Movies / Recently watched"]
@@ -1460,7 +1460,7 @@ async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_
         {"number": 2, "episodes": [{"number": n, "completed": False} for n in range(1, 4)]}]}
     await call(hass, "add_to_list", list="Shows", title="Severance")
     await call(hass, "add_to_list", list="Shows", title="Ghosts")
-    await call(hass, "set_progress", title="Ghosts", season=1, episode=2)   # we know where you are: not offered
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=20)   # we know where you are, and caught up: not offered
     # Apple TV gave only the show's title: the episode is a guess (S1E1)
     await _watch_on_bedroom(hass, freezer, {"app_name": "Apple TV", "media_title": "Severance"})
 
@@ -1586,3 +1586,19 @@ async def test_titles_not_matched_under_older_rules_are_looked_up_again(hass, se
     res = await hub.async_track_past_titles()
     assert res["tracked"] == ["Ghosts"]
     assert "looked_up_titles" not in hub.library.data
+
+
+
+async def test_catch_up_also_offers_shows_with_an_episode_available(hass, setup, freezer):
+    """Unknown position first, then shows with a new episode out (watched somewhere we
+    couldn't see, e.g. a live channel); a show you're caught up on isn't offered."""
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "set_progress", title="Severance", season=1, episode=4)        # S1E5 is out: available
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=20)         # caught up
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Lanterns"}, minutes=5)
+    assert hub.library.episode_unknown("tv:95350")
+    hub.changed()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.tv_tracker_pick_show").attributes["options"] == ["—", "Lanterns", "Severance"]

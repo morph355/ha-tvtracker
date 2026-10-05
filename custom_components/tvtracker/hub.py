@@ -813,22 +813,27 @@ class TVTrackerHub:
 
     # ---- "watched up to" picker -------------------------------------------
     def picker_shows(self) -> dict[str, str]:
-        """Shows to choose from (label -> item key): the ones you've watched where we
-        don't know which episode you're on (only the show's title was seen), most
-        recently watched first. The one already chosen stays until you've used it."""
-        items = self.library.data["items"]
-        keys = [
-            k for k, it in items.items()
-            if it["media_type"] == "tv" and not it.get("hidden")
-            and (self.library.episode_unknown(k) or k == self.picker.get("key"))
-        ]
-        keys.sort(key=lambda k: items[k].get("last_watched") or "", reverse=True)
-        out: dict[str, str] = {}
-        for v in (self.library.view(k, dt_util.now().date()) for k in keys):
-            if v["key"] in out.values():
+        """Shows to choose from (label -> item key): first the ones you've watched where
+        we don't know which episode you're on (only the show's title was seen), then
+        those with a new episode available to watch (you may have watched it somewhere
+        we couldn't see, like Now TV's live channel); most recently watched first in
+        each. The one already chosen stays until you've used it."""
+        lib, today = self.library, dt_util.now().date()
+        unknown: list[dict[str, Any]] = []
+        available: list[dict[str, Any]] = []
+        for k, it in lib.data["items"].items():
+            if it["media_type"] != "tv" or it.get("hidden"):
                 continue
-            label = v["title"] if v["title"] not in out else f"{v['title']} ({v['year']})"
-            out[label] = v["key"]
+            v = lib.view(k, today)
+            if lib.episode_unknown(k):
+                unknown.append(v)
+            elif v["group"] == "available" or k == self.picker.get("key"):
+                available.append(v)
+        out: dict[str, str] = {}
+        for group in (unknown, available):
+            for v in sorted(group, key=lambda v: v["last_watched"] or "", reverse=True):
+                label = v["title"] if v["title"] not in out else f"{v['title']} ({v['year']})"
+                out[label] = v["key"]
         return out
 
     async def async_pick_show(self, key: str) -> None:

@@ -463,3 +463,29 @@ def test_describe_candidate():
         == "you track it · aired 27 Sep · 45 min · on Now TV"
     assert describe_candidate({"air_date": None, "runtime": None, "on_service": True}, None) == ""
     assert describe_candidate({"air_date": "not a date"}, "Now TV") == ""
+
+
+def test_a_finished_show_comes_back_when_a_new_season_is_announced():
+    from tvt.logic import up_next_group
+    raw = {"name": "Silo", "status": "Ended",
+           "seasons": [{"season_number": 0, "episode_count": 2}, {"season_number": 1, "episode_count": 10},
+                       {"season_number": 2, "episode_count": 10}],
+           "last_episode_to_air": {"season_number": 2, "episode_number": 10}}
+    d = parse_details("tv", raw)
+    assert d["announced_season"] is None
+    assert up_next_group("finished", d["next_air_date"], d["announced_season"]) == "finished"
+
+    # renewed: TMDB lists season 3 (no date yet) and the show is returning
+    raw["status"] = "Returning Series"
+    raw["seasons"].append({"season_number": 3, "episode_count": 0, "air_date": None})
+    d = parse_details("tv", raw)
+    assert d["announced_season"] == {"season": 3, "air_date": None}
+    assert up_next_group("caught_up", d["next_air_date"], d["announced_season"]) == "coming_soon"
+    # even if TMDB still says "Ended" for a while
+    assert up_next_group("finished", None, d["announced_season"]) == "coming_soon"
+
+    # then a date for it
+    raw["seasons"][-1]["air_date"] = "2027-07-08"
+    assert parse_details("tv", raw)["announced_season"] == {"season": 3, "air_date": "2027-07-08"}
+    # and once its first episode is out, it's "available" (status is watching)
+    assert up_next_group("watching", None, None) == "available"

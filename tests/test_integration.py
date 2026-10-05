@@ -254,6 +254,14 @@ async def test_dashboard_templates_render(hass, setup, freezer):
         {"app_name": "Netflix", "media_title": "Ep", "media_series_title": "Severance"})
     await hass.async_block_till_done()
 
+    # Ghosts: caught up, a new season announced with no date yet -> "coming soon"
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=20)
+    hub = hass.data[DOMAIN][setup.entry_id]
+    hub.library.data["items"]["tv:4242"]["details"]["announced_season"] = {"season": 2, "air_date": None}
+    hub.changed()
+    await hass.async_block_till_done()
+
     dash = yaml.safe_load(pathlib.Path("dashboard/tvtracker.yaml").read_text())
     out = {}
 
@@ -270,7 +278,7 @@ async def test_dashboard_templates_render(hass, setup, freezer):
     assert "**Bedroom** — Severance (Netflix)" in out["Watching / Now watching"]
     assert "**Family Room** — off" in out["Watching / Now watching"]
     assert "**Severance** — next **S1E4** · on Apple TV" in out["Watching / Up next — available to watch"]
-    assert "Nothing scheduled" in out["Watching / Up next — coming soon"]
+    assert "**Ghosts** — season 2 announced, no date yet" in out["Watching / Up next — coming soon"]
     assert "Choose a show above" in out["Catch up / Unwatched episodes"]
     assert "### Shows" in out["Watchlists / Watchlists"] and "### Movies" in out["Watchlists / Watchlists"]
     assert "Dune" in out["Watchlists / Watchlists"] and "Watch on Netflix" in out["Watchlists / Watchlists"]

@@ -165,12 +165,13 @@ views:
       - type: markdown
         title: Up next — coming soon
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'coming_soon') | sort(attribute='next_air_date') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'coming_soon') | list -%}
           {% if rows | length == 0 -%}
           Nothing scheduled.
           {% endif -%}
-          {% for v in rows -%}
-          - **{{ v.title }}** — {{ as_timestamp(v.next_air_date) | timestamp_custom('%a %d %b') }} · {% if v.watched_on %}on {{ v.watched_on | join(', ') }}{% else %}{{ v.availability }}{% endif %}
+          {% for v in (rows | selectattr('expected') | sort(attribute='expected') | list) + (rows | rejectattr('expected') | sort(attribute='title') | list) -%}
+          {% set a = v.announced_season -%}
+          - **{{ v.title }}** — {% if v.next_air_date %}{{ as_timestamp(v.next_air_date) | timestamp_custom('%a %d %b %Y') }}{% elif a and a.air_date %}season {{ a.season }} from {{ as_timestamp(a.air_date) | timestamp_custom('%d %b %Y') }}{% else %}season {{ a.season }} announced, no date yet{% endif %} · {% if v.watched_on %}on {{ v.watched_on | join(', ') }}{% else %}{{ v.availability }}{% endif %}
           {% endfor %}
       - type: markdown
         title: Up next — finished

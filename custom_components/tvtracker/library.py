@@ -445,7 +445,11 @@ class Library:
             "hidden": bool(item.get("hidden")),
             # the services you've actually watched it on (learned, or set by you)
             "watched_on": list(item.get("watch_on") or []),
-            "group": up_next_group(status, details.get("next_air_date")),
+            "group": up_next_group(status, details.get("next_air_date"), details.get("announced_season")),
+            "announced_season": details.get("announced_season"),
+            # when the next episode (or the announced season) is expected, if known
+            "expected": details.get("next_air_date")
+            or (details.get("announced_season") or {}).get("air_date"),
         }
 
     def watchlists(self, today: date) -> dict[str, list[dict[str, Any]]]:

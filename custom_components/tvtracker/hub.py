@@ -54,7 +54,7 @@ from .logic import (
     parse_trakt_watched_movies,
     response_timestamp,
 )
-from .tmdb import TMDB, TMDBError
+from .tmdb import TMDB, TMDBAuthError, TMDBError
 from .trakt import TraktAuthError, TraktClient, TraktError
 
 _LOGGER = logging.getLogger(__name__)
@@ -468,9 +468,11 @@ class TVTrackerHub:
         for item in list(self.library.data["items"].values()):
             try:
                 await self.fetch_item(item["media_type"], item["tmdb_id"])
-            except TMDBError as err:
+            except TMDBAuthError as err:
+                _LOGGER.warning("Could not refresh from TMDB: %s", err)
+                break
+            except TMDBError as err:  # one bad item mustn't stop the rest being refreshed
                 _LOGGER.warning("Could not refresh %s: %s", item["title"], err)
-                return
         self.changed()
 
     async def _scheduled_refresh(self, _now: datetime) -> None:

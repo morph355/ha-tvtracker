@@ -507,8 +507,23 @@ def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
                 else None
             ),
             next_air_date=nxt.get("air_date") or None,
+            announced_season=_announced_season(raw.get("seasons") or [], last.get("season_number")),
         )
     return details
+
+
+def _announced_season(seasons: list[dict[str, Any]], last_aired_season: int | None) -> dict[str, Any] | None:
+    """The first season after the one airing/aired last, if TMDB lists one (a renewal
+    is often listed long before any episode has a date)."""
+    if not last_aired_season:
+        return None
+    later = sorted(
+        (s for s in seasons if (s.get("season_number") or 0) > last_aired_season),
+        key=lambda s: s["season_number"],
+    )
+    if not later:
+        return None
+    return {"season": int(later[0]["season_number"]), "air_date": later[0].get("air_date") or None}
 
 
 # --------------------------------------------------------------------------
@@ -807,13 +822,16 @@ def derive_status(item: dict[str, Any], today: date) -> str:
     return "finished" if details.get("status") in ("Ended", "Canceled") else "caught_up"
 
 
-def up_next_group(status: str, next_air_date: str | None) -> str | None:
+def up_next_group(
+    status: str, next_air_date: str | None, announced_season: dict[str, Any] | None = None
+) -> str | None:
     """Where a show sits under Up Next: "available" (the next episode is out),
-    "coming_soon" (you're caught up and another is scheduled) or "finished"
-    (ended, or caught up with nothing scheduled)."""
+    "coming_soon" (you're caught up and another episode or a new season is on the
+    way, dated or not) or "finished" (ended, or nothing more announced). A finished
+    show moves back as soon as TMDB lists a new season."""
     if status == "watching":
         return "available"
-    if status == "caught_up" and next_air_date:
+    if status in ("caught_up", "finished") and (next_air_date or announced_season):
         return "coming_soon"
     if status in ("caught_up", "finished"):
         return "finished"

@@ -857,7 +857,7 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
     }
 
 
-_COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
+COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
 
 
 _TRAILING_NUMBER = re.compile(r"\s+\d{1,3}\s*$")
@@ -884,10 +884,10 @@ def match_score(
         if norm_title(cand) == target:
             return True
         # "Ghosts US" / "Ghosts (UK)" vs "Ghosts" (and the other way round)
-        stripped = _COUNTRY_SUFFIX.sub("", cand)
+        stripped = COUNTRY_SUFFIX.sub("", cand)
         if stripped != cand and norm_title(stripped) == target:
             return True
-        if norm_title(_COUNTRY_SUFFIX.sub("", item_title)) == norm_title(cand):
+        if norm_title(COUNTRY_SUFFIX.sub("", item_title)) == norm_title(cand):
             return True
         # "Severance - S2E4", "Severance: The Chair"
         low = cand.lower().lstrip()

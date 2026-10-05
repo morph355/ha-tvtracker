@@ -1393,3 +1393,48 @@ async def test_typing_the_right_show_also_works_for_a_viewing_with_options(hass,
     res = await call(hass, "assign_match", show="Lanterns")
     assert (res["title"], res["episode"]) == ("Lanterns", 3)
     assert hub.library.data["history"][-1]["candidates"] is None and len(fake_trakt["added"]) == 1
+
+
+async def test_a_show_seen_for_the_first_time_is_tracked_and_asks_before_telling_trakt(hass, setup_trakt, fake_trakt, freezer):
+    """BBC iPlayer sends just "Ghosts US" and the show is on no list: it must still
+    appear (continue watching), but its episode is only a guess, so Trakt waits."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    assert "tv:4242" not in hub.library.data["items"]
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+
+    item = hub.library.data["items"]["tv:4242"]
+    assert item["progress"] == {"season": 1, "episode": 1} and item["progress_source"] == "guess"
+    lib = await call(hass, "get_library")
+    assert any(i["title"] == "Ghosts" for i in lib["continue_watching"])
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "1"
+
+    res = await call(hass, "confirm_match")
+    assert res["sent_to_trakt"] is True
+    (payload,) = fake_trakt["added"]
+    assert payload["shows"][0]["ids"] == {"tmdb": 4242}
+    assert hub.library.data["items"]["tv:4242"]["progress_source"] == "reported"
+
+
+async def test_dismissing_a_guess_puts_back_the_progress_you_had_or_forgets_a_new_show(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+    await call(hass, "dismiss_match")
+    assert "tv:4242" not in hub.library.data["items"]            # only ever added because of the guess
+
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=1)
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 2}
+    await call(hass, "dismiss_match")
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 1}
+    assert fake_trakt["added"] == []
+
+
+async def test_an_ambiguous_or_unknown_title_is_not_added_on_a_guess(hass, setup, freezer):
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "A Film Nobody Tracks"})
+    assert hub.library.data["items"] == {}
+    assert hub.library.data["history"][-1]["title"] == "A Film Nobody Tracks"

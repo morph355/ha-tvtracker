@@ -287,7 +287,7 @@ class Library:
             return None
         if session.get("service"):
             self.set_watch_service(key, session["service"])
-        seconds =(session["end"] - session["start"]).total_seconds()
+        seconds = (session["end"] - session["start"]).total_seconds()
         item = self.data["items"][key]
         fraction = self.watched_fraction(session, item, seconds)
         session["_fraction"] = fraction
@@ -314,8 +314,20 @@ class Library:
                 source="found" if session.get("_found") else "reported",
             )
         else:
-            nxt = next_episode(item["details"], item.get("progress"))
+            # Only the show's title: guess the next episode. For a show that is airing
+            # now and that we know nothing about yet, the latest one (people mostly
+            # watch what's just aired) rather than the first.
+            details = item["details"] or {}
+            last = details.get("last_aired")
+            if item.get("progress") is None and last and details.get("next_air_date"):
+                nxt = (last["season"], last["episode"])
+            else:
+                nxt = next_episode(item["details"], item.get("progress"))
             if nxt:
+                session["_guess"] = {
+                    "season": nxt[0], "episode": nxt[1],
+                    "previous": item.get("progress"), "previous_source": item.get("progress_source"),
+                }
                 self.set_progress(key, nxt[0], nxt[1], when, source="guess")
         return key
 

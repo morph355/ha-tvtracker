@@ -30,6 +30,7 @@ from .const import (
     TRAKT_INITIAL_DAYS,
     TRAKT_SYNC_HOURS,
     TRAKT_SYNC_OVERLAP_DAYS,
+    MAX_PICKER_EPISODES,
     WATCHED_FRACTION,
 )
 from .library import Library, item_key
@@ -76,6 +77,8 @@ class TVTrackerHub:
         self._outbox_lock = asyncio.Lock()
         self._sleep = asyncio.sleep
         self.search_text = ""        # what you typed into the "show search" box
+        # the "watched up to" picker: the chosen show, its unwatched episodes, the chosen one
+        self.picker: dict[str, Any] = {"key": None, "episodes": [], "choice": None, "loading": False}
         self.last_episode_search: dict[str, Any] = {}
         self.rooms = rooms
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -743,8 +746,69 @@ class TVTrackerHub:
         self._notify("trakt", "Trakt disconnected", f"{err}. Run tvtracker.trakt_connect.")
         self.changed()
 
-    async def async_trakt_mark_watched(self, key: str, dry_run: bool = False) -> dict[str, Any]:
-        """Add to Trakt every aired episode (or the film) it doesn't have a watch for.
+    # ---- "watched up to" picker -------------------------------------------
+    def picker_shows(self) -> dict[str, str]:
+        """Shows to choose from (label -> item key): Up Next and watchlists."""
+        today = dt_util.now().date()
+        views = self.library.continue_watching(today) + [
+            v for items in self.library.watchlists(today).values() for v in items
+        ]
+        out: dict[str, str] = {}
+        for v in views:
+            if v["type"] != "tv" or v["key"] in out.values():
+                continue
+            label = v["title"] if v["title"] not in out else f"{v['title']} ({v['year']})"
+            out[label] = v["key"]
+        return out
+
+    async def async_pick_show(self, key: str) -> None:
+        """Load the chosen show's unwatched episodes (names from TMDB)."""
+        self.picker = {"key": key, "episodes": [], "choice": None, "loading": True}
+        self.changed()
+        try:
+            await self._load_picker_episodes()
+        finally:
+            self.picker["loading"] = False
+            self.changed()
+
+    async def _load_picker_episodes(self) -> None:
+        key = self.picker["key"]
+        item = self.library.data["items"].get(key or "")
+        if item is None:
+            return
+        start = (item.get("progress") or {}).get("season") or 1
+        seasons = [int(x) for x in (item.get("details") or {}).get("seasons") or {} if int(x) >= start]
+        try:
+            names = await self.episode_names(item, seasons)
+        except TMDBError as err:
+            _LOGGER.warning("Could not load the episodes of %s: %s", item["title"], err)
+            names = []
+        eps = self.library.unwatched_episodes(key, names, dt_util.now().date())[:MAX_PICKER_EPISODES]
+        self.picker["episodes"] = [
+            {"label": f"S{e['season']}E{e['episode']} · {e['name'] or 'Episode ' + str(e['episode'])}",
+             "season": e["season"], "episode": e["episode"], "air_date": e.get("air_date")}
+            for e in eps
+        ]
+        self.picker["choice"] = None
+
+    async def async_watched_up_to(self, key: str, season: int, episode: int, trakt: bool = True) -> dict[str, Any]:
+        """You've watched everything up to and including S<season>E<episode>: set that
+        as where you are, and add any of those episodes Trakt hasn't got (never deletes)."""
+        item = self.library.get_item(key)
+        self.library.set_progress(key, season, episode, dt_util.utcnow(), source="manual")
+        result: dict[str, Any] = {"title": item["title"], "progress": f"S{season}E{episode}"}
+        if trakt and self.trakt is not None and self.trakt_status == "connected":
+            result["trakt"] = await self.async_trakt_mark_watched(key, upto=(season, episode))
+        if self.picker.get("key") == key:
+            await self._load_picker_episodes()
+        self.changed()
+        return result
+
+    async def async_trakt_mark_watched(
+        self, key: str, dry_run: bool = False, upto: tuple[int, int] | None = None
+    ) -> dict[str, Any]:
+        """Add to Trakt every aired episode (or the film) it doesn't have a watch for,
+        or with `upto` only those up to and including that episode.
 
         Trakt is asked what you've already watched first, so nothing is watched
         twice; new watches are dated to when each episode aired. Never deletes.
@@ -771,6 +835,7 @@ class TVTrackerHub:
                     {"media_type": "tv", "tmdb_id": item["tmdb_id"], "ids": {"trakt": trakt_id},
                      "season": s, "episode": e, "watched_at": "released"}
                     for s, e in info["missing"]
+                    if upto is None or (s, e) <= tuple(upto)
                 ]
                 already = info["completed"]
                 extra = {

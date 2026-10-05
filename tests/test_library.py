@@ -240,3 +240,15 @@ def test_movies_use_the_same_rule():
     assert not lib.data["items"]["movie:9"]["watched"]
     lib.apply_session({**base, "duration_ms": 155 * 60_000, "final_pos_ms": 140 * 60_000}, 600)  # 90%
     assert lib.data["items"]["movie:9"]["watched"]
+
+
+def test_unwatched_episodes_are_the_aired_ones_after_where_you_are():
+    lib = make_lib()
+    eps = [{"season": s, "episode": e, "name": f"{s}.{e}", "air_date": d} for s, e, d in [
+        (0, 1, "2020-01-01"),            # a special: never offered
+        (1, 1, "2022-01-01"), (1, 2, "2022-01-08"), (2, 1, "2026-09-01"),
+        (2, 2, "2026-10-06"),            # airs tomorrow
+        (2, 3, None)]]                   # no date announced
+    assert [(e["season"], e["episode"]) for e in lib.unwatched_episodes("tv:95396", eps, TODAY)] == [(1, 1), (1, 2), (2, 1)]
+    lib.set_progress("tv:95396", 1, 2)
+    assert [(e["season"], e["episode"]) for e in lib.unwatched_episodes("tv:95396", eps, TODAY)] == [(2, 1)]

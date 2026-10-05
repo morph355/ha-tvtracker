@@ -807,6 +807,19 @@ def derive_status(item: dict[str, Any], today: date) -> str:
     return "finished" if details.get("status") in ("Ended", "Canceled") else "caught_up"
 
 
+def up_next_group(status: str, next_air_date: str | None) -> str | None:
+    """Where a show sits under Up Next: "available" (the next episode is out),
+    "coming_soon" (you're caught up and another is scheduled) or "finished"
+    (ended, or caught up with nothing scheduled)."""
+    if status == "watching":
+        return "available"
+    if status == "caught_up" and next_air_date:
+        return "coming_soon"
+    if status in ("caught_up", "finished"):
+        return "finished"
+    return None
+
+
 def _pretty_date(text: str | None) -> str | None:
     d = _parse_date(text)
     return f"{d.day} {d:%b %Y}" if d else None

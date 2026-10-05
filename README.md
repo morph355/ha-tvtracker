@@ -6,7 +6,8 @@ Track what the household watches on the Android TVs, where, and what to watch ne
 - **Viewing history** – every session is logged (room, app, title, time). **YouTube is tracked as its own category**, separate from TV & movies. **Music is ignored.**
 - **Multiple watchlists** – TV shows and movies. When a TV plays something on a list, it is marked watched / progress is advanced automatically.
 - **Where to watch** – for every title, TMDB (JustWatch data) says which of *your* services carry it, whether it's on another service, rent/buy only, or **not available yet** (with the due date when known).
-- **Continue watching** – shows you've started but not finished, with the next episode and where to stream it. Shows you're up to date on are shown as "caught up".
+- **Up next** – shows you've started, in three groups: *available to watch* (the next episode is out, with the service you watch it on), *coming soon* (you're caught up; the next episode's date) and *finished* (ended, or nothing new announced).
+- **Catch up** – choose a show and see its unwatched episodes by name; choose the last one you've watched and everything up to it is marked watched, here and on Trakt (only what Trakt hasn't got).
 - **Your services** – Netflix, Disney+, Apple TV, Prime Video, BBC iPlayer, ITVX, Channel 4 and Now TV to start with. If a TV is used with a new streaming app, it is added to the list automatically.
 - **Manual history** – anything the TVs missed can be logged by a service call, or by asking Claude (see below).
 

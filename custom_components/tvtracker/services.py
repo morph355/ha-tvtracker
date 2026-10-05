@@ -150,6 +150,29 @@ def async_register_services(hass: HomeAssistant) -> None:
         hub.changed()
         return {"item": hub.library.view(item["key"], _today(hass))}
 
+    async def watched_up_to(call: ServiceCall):
+        hub = _hub(hass)
+        item = await _resolve(hub, call.data)
+        if item["media_type"] != "tv":
+            raise ServiceValidationError(f"{item['title']} is a film; use mark_watched")
+        return await hub.async_watched_up_to(
+            item["key"], call.data["season"], call.data["episode"], call.data["trakt"]
+        )
+
+    async def unwatched_episodes(call: ServiceCall):
+        hub = _hub(hass)
+        item = await _resolve(hub, call.data)
+        if item["media_type"] != "tv":
+            raise ServiceValidationError(f"{item['title']} is a film")
+        try:
+            names = await hub.episode_names(item)
+        except TMDBError as err:
+            raise HomeAssistantError(str(err)) from err
+        eps = hub.library.unwatched_episodes(item["key"], names, _today(hass))
+        return {"title": item["title"], "episodes": [
+            {"season": e["season"], "episode": e["episode"], "name": e["name"], "aired": e["air_date"]} for e in eps
+        ]}
+
     async def mark_watched(call: ServiceCall):
         hub = _hub(hass)
         item = await _resolve(hub, call.data)
@@ -349,6 +372,17 @@ def async_register_services(hass: HomeAssistant) -> None:
         set_progress,
         {vol.Required("season"): vol.Coerce(int), vol.Required("episode"): vol.Coerce(int), **TARGET},
     )
+    register(
+        "watched_up_to",
+        watched_up_to,
+        {
+            vol.Required("season"): vol.Coerce(int),
+            vol.Required("episode"): vol.Coerce(int),
+            vol.Optional("trakt", default=True): cv.boolean,
+            **TARGET,
+        },
+    )
+    register("unwatched_episodes", unwatched_episodes, TARGET)
     register(
         "mark_watched",
         mark_watched,

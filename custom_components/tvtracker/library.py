@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from .const import DEFAULT_SERVICES, HISTORY_LIMIT, WATCHED_FRACTION
+from .const import DEFAULT_SERVICES, FINISHED_SHOWN_DAYS, HISTORY_LIMIT, WATCHED_FRACTION
 from .logic import (
     availability,
     canonical_service,
@@ -16,6 +16,7 @@ from .logic import (
     match_score,
     next_episode,
     norm_title,
+    up_next_group,
 )
 
 
@@ -138,6 +139,17 @@ class Library:
             if norm_title(it["title"]) == target
             and (media_type is None or it["media_type"] == media_type)
         ]
+
+    def unwatched_episodes(self, key: str, episodes: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+        """Aired episodes after where you are (all of them if you haven't started)."""
+        progress = self.get_item(key).get("progress") or {"season": 0, "episode": 0}
+        done = (progress["season"], progress["episode"])
+        out = [
+            e for e in episodes
+            if e["season"] >= 1 and (e["season"], e["episode"]) > done
+            and e.get("air_date") and e["air_date"] <= today.isoformat()
+        ]
+        return sorted(out, key=lambda e: (e["season"], e["episode"]))
 
     def set_hidden(self, key: str, hidden: bool = True) -> None:
         """Hide a show or film from the dashboard lists (its history is kept)."""
@@ -431,6 +443,9 @@ class Library:
             "lists": [self.data["lists"][i]["name"] for i in item["lists"] if i in self.data["lists"]],
             "last_watched": item.get("last_watched"),
             "hidden": bool(item.get("hidden")),
+            # the services you've actually watched it on (learned, or set by you)
+            "watched_on": list(item.get("watch_on") or []),
+            "group": up_next_group(status, details.get("next_air_date")),
         }
 
     def watchlists(self, today: date) -> dict[str, list[dict[str, Any]]]:
@@ -450,8 +465,14 @@ class Library:
 
     def continue_watching(self, today: date) -> list[dict[str, Any]]:
         views = [self.view(k, today) for k in self.data["items"]]
+        recent = (today - timedelta(days=FINISHED_SHOWN_DAYS)).isoformat()
         started = [
-            v for v in views if v["status"] in ("watching", "caught_up") and not v["hidden"]
+            v for v in views
+            if not v["hidden"] and (
+                v["status"] in ("watching", "caught_up")
+                # a finished show stays a while, under "Finished"
+                or (v["status"] == "finished" and (v["last_watched"] or "") >= recent)
+            )
         ]
         # Most recently watched first, then "watching" ahead of "caught up".
         started.sort(key=lambda v: v["last_watched"] or "", reverse=True)

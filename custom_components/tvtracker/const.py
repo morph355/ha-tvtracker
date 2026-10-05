@@ -48,12 +48,17 @@ REFRESH_INTERVAL_HOURS = 12
 # How often to look at a TV's media session (title, position) while it is on.
 ADB_POLL_SECONDS = 30
 HISTORY_LIMIT = 1000
+# A show you've finished stays under Up Next > Finished for this long.
+FINISHED_SHOWN_DAYS = 60
+# The most episodes offered in the "watched up to" picker.
+MAX_PICKER_EPISODES = 400
 
 CONF_TRAKT_ID = "trakt_client_id"
 CONF_TRAKT_SECRET = "trakt_client_secret"
-# Trakt's streaming sync can add watches late and date-only, so each sync
-# re-reads this many days before the last one and skips what it has applied.
-TRAKT_SYNC_OVERLAP_DAYS = 3
+# Trakt's streaming sync (Netflix etc.) can add watches days late, dated when you
+# actually watched, so each sync re-reads this many days before the last one and
+# skips what it has already applied.
+TRAKT_SYNC_OVERLAP_DAYS = 30
 # On first connect only import this much history (not years of it).
 TRAKT_INITIAL_DAYS = 60
 TRAKT_SYNC_HOURS = 1

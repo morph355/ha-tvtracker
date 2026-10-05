@@ -188,7 +188,8 @@ views:
     path: catch-up
     icon: mdi:playlist-check
     cards:
-      # Lists the shows watched where only the title was seen (so the episode is unknown).
+      # Lists the shows watched where only the title was seen (so the episode is unknown),
+      # then shows with a new episode out (perhaps watched where we couldn't see it).
       # Choose one, then the last episode you've watched: everything up to it is marked
       # watched here and added to Trakt (only what Trakt hasn't got).
       - type: entities
@@ -206,9 +207,9 @@ views:
           {% set e = 'select.tv_tracker_watched_up_to' -%}
           {% if not state_attr(e, 'show') -%}
           {% if (state_attr('select.tv_tracker_pick_show', 'options') or []) | length > 1 -%}
-          These shows were watched but we don't know which episode you're up to. Choose one above.
+          Choose a show above: first those watched where we don't know which episode you're up to, then those with a new episode out.
           {% else -%}
-          Nothing to catch up on: we know where you are with every show.
+          Nothing to catch up on.
           {% endif -%}
           {% elif state_attr(e, 'loading') -%}
           Loading episodes…

@@ -155,7 +155,7 @@ views:
       - type: markdown
         title: Up next — available to watch
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'available') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'available') | list -%}
           {% if rows | length == 0 -%}
           Nothing waiting.
           {% endif -%}
@@ -165,7 +165,7 @@ views:
       - type: markdown
         title: Up next — coming soon
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'coming_soon') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'coming_soon') | list -%}
           {% if rows | length == 0 -%}
           Nothing scheduled.
           {% endif -%}
@@ -176,7 +176,7 @@ views:
       - type: markdown
         title: Up next — finished
         content: |-
-          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('group', 'eq', 'finished') | list -%}
+          {% set rows = (state_attr('sensor.tv_tracker_continue_watching', 'items') or []) | selectattr('type', 'eq', 'tv') | selectattr('group', 'eq', 'finished') | list -%}
           {% if rows | length == 0 -%}
           Nothing finished lately.
           {% endif -%}
@@ -188,8 +188,9 @@ views:
     path: catch-up
     icon: mdi:playlist-check
     cards:
-      # Choose a show, then the last episode you've watched: everything up to it is
-      # marked watched here and added to Trakt (only what Trakt hasn't got).
+      # Lists the shows watched where only the title was seen (so the episode is unknown).
+      # Choose one, then the last episode you've watched: everything up to it is marked
+      # watched here and added to Trakt (only what Trakt hasn't got).
       - type: entities
         title: Where are you up to?
         entities:
@@ -204,7 +205,11 @@ views:
         content: |-
           {% set e = 'select.tv_tracker_watched_up_to' -%}
           {% if not state_attr(e, 'show') -%}
-          Choose a show above.
+          {% if (state_attr('select.tv_tracker_pick_show', 'options') or []) | length > 1 -%}
+          These shows were watched but we don't know which episode you're up to. Choose one above.
+          {% else -%}
+          Nothing to catch up on: we know where you are with every show.
+          {% endif -%}
           {% elif state_attr(e, 'loading') -%}
           Loading episodes…
           {% elif state_attr(e, 'count') == 0 -%}

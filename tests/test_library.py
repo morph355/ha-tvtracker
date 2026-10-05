@@ -252,3 +252,10 @@ def test_unwatched_episodes_are_the_aired_ones_after_where_you_are():
     assert [(e["season"], e["episode"]) for e in lib.unwatched_episodes("tv:95396", eps, TODAY)] == [(1, 1), (1, 2), (2, 1)]
     lib.set_progress("tv:95396", 1, 2)
     assert [(e["season"], e["episode"]) for e in lib.unwatched_episodes("tv:95396", eps, TODAY)] == [(2, 1)]
+
+
+def test_films_are_not_listed_under_up_next():
+    lib = make_lib()
+    lib.mark_watched("movie:1", True, NOW)
+    lib.set_progress("tv:95396", 1, 2, NOW)
+    assert [v["key"] for v in lib.continue_watching(TODAY)] == ["tv:95396"]

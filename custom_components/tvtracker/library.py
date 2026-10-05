@@ -151,6 +151,14 @@ class Library:
         ]
         return sorted(out, key=lambda e: (e["season"], e["episode"]))
 
+    def episode_unknown(self, key: str) -> bool:
+        """Watched, but we don't know which episode you're up to: only the show's
+        title was seen (a guessed position, or none at all)."""
+        item = self.get_item(key)
+        if item.get("progress"):
+            return item.get("progress_source") == "guess"
+        return bool(item.get("episode_unknown"))
+
     def set_hidden(self, key: str, hidden: bool = True) -> None:
         """Hide a show or film from the dashboard lists (its history is kept)."""
         self.get_item(key)["hidden"] = bool(hidden)
@@ -335,6 +343,8 @@ class Library:
                 nxt = (last["season"], last["episode"])
             else:
                 nxt = next_episode(item["details"], item.get("progress"))
+            if not nxt:
+                item["episode_unknown"] = True
             if nxt:
                 session["_guess"] = {
                     "season": nxt[0], "episode": nxt[1],
@@ -472,7 +482,8 @@ class Library:
         recent = (today - timedelta(days=FINISHED_SHOWN_DAYS)).isoformat()
         started = [
             v for v in views
-            if not v["hidden"] and (
+            # shows only, for now: films don't have an "up next"
+            if v["type"] == "tv" and not v["hidden"] and (
                 v["status"] in ("watching", "caught_up")
                 # a finished show stays a while, under "Finished"
                 or (v["status"] == "finished" and (v["last_watched"] or "") >= recent)

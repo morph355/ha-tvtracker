@@ -29,6 +29,7 @@ from .const import (
     STORAGE_VERSION,
     TRAKT_INITIAL_DAYS,
     TRAKT_SYNC_HOURS,
+    TITLE_LOOKUP_VERSION,
     TRAKT_SYNC_OVERLAP_DAYS,
     MAX_PICKER_EPISODES,
     WATCHED_FRACTION,
@@ -479,7 +480,12 @@ class TVTrackerHub:
         under "Where are you up to?". Nothing is sent to Trakt. Each title is
         looked up once."""
         lib = self.library
-        tried: list[str] = lib.data.setdefault("looked_up_titles", [])
+        # Titles already looked up, remembered per version of the matching rules, so a
+        # title that couldn't be matched before (e.g. "Ghosts US") is retried once
+        # the rules improve.
+        tried: list[str] = lib.data.setdefault(f"looked_up_titles_v{TITLE_LOOKUP_VERSION}", [])
+        for old in [k for k in lib.data if k.startswith("looked_up_titles") and k != f"looked_up_titles_v{TITLE_LOOKUP_VERSION}"]:
+            del lib.data[old]
         result: dict[str, Any] = {"tracked": [], "not_found": []}
         rows = [
             h for h in lib.data["history"]

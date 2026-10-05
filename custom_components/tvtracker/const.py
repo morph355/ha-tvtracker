@@ -52,6 +52,9 @@ HISTORY_LIMIT = 1000
 FINISHED_SHOWN_DAYS = 60
 # The most episodes offered in the "watched up to" picker.
 MAX_PICKER_EPISODES = 400
+# Bump when the rules for matching a title to a TMDB show improve, so titles that
+# couldn't be matched before are looked up again (2: country suffixes, "Ghosts US").
+TITLE_LOOKUP_VERSION = 2
 
 CONF_TRAKT_ID = "trakt_client_id"
 CONF_TRAKT_SECRET = "trakt_client_secret"

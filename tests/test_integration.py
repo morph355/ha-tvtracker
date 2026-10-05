@@ -1572,3 +1572,17 @@ async def test_a_country_suffix_picks_the_right_one_of_two_shows_with_the_same_n
 
     # with no suffix, two shows of that name is too uncertain: nothing is added
     assert await hub._find_on_tmdb("Ghosts") is None
+
+
+
+async def test_titles_not_matched_under_older_rules_are_looked_up_again(hass, setup):
+    """"Ghosts US" was looked up (and not matched) by an older version; once the
+    matching rules improve it is tried again, and found."""
+    hub = hass.data[DOMAIN][setup.entry_id]
+    hub.library.data["looked_up_titles"] = ["ghostsus"]          # what the older version stored
+    hub.library.add_history({"start": "2026-10-05T19:22:41+00:00", "end": "2026-10-05T19:27:51+00:00",
+                             "room": "Living Room", "category": "tv_movies", "service": "BBC iPlayer",
+                             "title": "Ghosts US", "item_key": None, "source": "auto"})
+    res = await hub.async_track_past_titles()
+    assert res["tracked"] == ["Ghosts"]
+    assert "looked_up_titles" not in hub.library.data

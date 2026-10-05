@@ -66,6 +66,7 @@ class TMDB:
                         "year": date[:4] or None,
                         "overview": (r.get("overview") or "")[:160],
                         "popularity": r.get("popularity", 0),
+                        "origin_country": r.get("origin_country") or [],
                     }
                 )
         results.sort(key=lambda r: r["popularity"], reverse=True)

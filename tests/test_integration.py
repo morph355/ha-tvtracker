@@ -254,6 +254,14 @@ async def test_dashboard_templates_render(hass, setup, freezer):
         {"app_name": "Netflix", "media_title": "Ep", "media_series_title": "Severance"})
     await hass.async_block_till_done()
 
+    # Ghosts: caught up, a new season announced with no date yet -> "coming soon"
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=20)
+    hub = hass.data[DOMAIN][setup.entry_id]
+    hub.library.data["items"]["tv:4242"]["details"]["announced_season"] = {"season": 2, "air_date": None}
+    hub.changed()
+    await hass.async_block_till_done()
+
     dash = yaml.safe_load(pathlib.Path("dashboard/tvtracker.yaml").read_text())
     out = {}
 
@@ -269,7 +277,9 @@ async def test_dashboard_templates_render(hass, setup, freezer):
                 out[f"{view['title']} / {card['title']}"] = Template(card["content"], hass).async_render(parse_result=False)
     assert "**Bedroom** — Severance (Netflix)" in out["Watching / Now watching"]
     assert "**Family Room** — off" in out["Watching / Now watching"]
-    assert "**Severance** — up next **S1E4**" in out["Watching / Continue watching"]
+    assert "**Severance** — next **S1E4** · on Apple TV" in out["Watching / Up next — available to watch"]
+    assert "**Ghosts** — season 2 announced, no date yet" in out["Watching / Up next — coming soon"]
+    assert "Choose a show above" in out["Catch up / Unwatched episodes"]
     assert "### Shows" in out["Watchlists / Watchlists"] and "### Movies" in out["Watchlists / Watchlists"]
     assert "Dune" in out["Watchlists / Watchlists"] and "Watch on Netflix" in out["Watchlists / Watchlists"]
     assert "Severance" in out["TV & Movies / Recently watched"] and "S1E3" in out["TV & Movies / Recently watched"]
@@ -1393,3 +1403,107 @@ async def test_typing_the_right_show_also_works_for_a_viewing_with_options(hass,
     res = await call(hass, "assign_match", show="Lanterns")
     assert (res["title"], res["episode"]) == ("Lanterns", 3)
     assert hub.library.data["history"][-1]["candidates"] is None and len(fake_trakt["added"]) == 1
+
+
+async def test_a_show_seen_for_the_first_time_is_tracked_and_asks_before_telling_trakt(hass, setup_trakt, fake_trakt, freezer):
+    """BBC iPlayer sends just "Ghosts US" and the show is on no list: it must still
+    appear (continue watching), but its episode is only a guess, so Trakt waits."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    assert "tv:4242" not in hub.library.data["items"]
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+
+    item = hub.library.data["items"]["tv:4242"]
+    assert item["progress"] == {"season": 1, "episode": 1} and item["progress_source"] == "guess"
+    lib = await call(hass, "get_library")
+    assert any(i["title"] == "Ghosts" for i in lib["continue_watching"])
+    assert fake_trakt["added"] == [] and hub.trakt_outbox == []
+    assert hass.states.get("sensor.tv_tracker_needs_confirming").state == "1"
+
+    res = await call(hass, "confirm_match")
+    assert res["sent_to_trakt"] is True
+    (payload,) = fake_trakt["added"]
+    assert payload["shows"][0]["ids"] == {"tmdb": 4242}
+    assert hub.library.data["items"]["tv:4242"]["progress_source"] == "reported"
+
+
+async def test_dismissing_a_guess_puts_back_the_progress_you_had_or_forgets_a_new_show(hass, setup_trakt, fake_trakt, freezer):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+    await call(hass, "dismiss_match")
+    assert "tv:4242" not in hub.library.data["items"]            # only ever added because of the guess
+
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=1)
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"})
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 2}
+    await call(hass, "dismiss_match")
+    assert hub.library.data["items"]["tv:4242"]["progress"] == {"season": 1, "episode": 1}
+    assert fake_trakt["added"] == []
+
+
+async def test_an_ambiguous_or_unknown_title_is_not_added_on_a_guess(hass, setup, freezer):
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "A Film Nobody Tracks"})
+    assert hub.library.data["items"] == {}
+    assert hub.library.data["history"][-1]["title"] == "A Film Nobody Tracks"
+
+
+async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_it(hass, setup_trakt, fake_trakt):
+    """Choose a show, see its unwatched episodes by name, choose the last one you've
+    seen: HA moves there and Trakt gets only what it hasn't got, up to that episode."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["show_progress"] = {"seasons": [
+        {"number": 1, "episodes": [{"number": n, "completed": True} for n in range(1, 10)]},
+        {"number": 2, "episodes": [{"number": n, "completed": False} for n in range(1, 4)]}]}
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "set_progress", title="Severance", season=1, episode=2)
+
+    show, ep, button = "select.tv_tracker_pick_show", "select.tv_tracker_watched_up_to", "button.tv_tracker_mark_watched_up_to"
+    assert "Severance" in hass.states.get(show).attributes["options"]
+    await hass.services.async_call("select", "select_option", {"entity_id": show, "option": "Severance"}, blocking=True)
+    await hass.async_block_till_done()
+    a = hass.states.get(ep).attributes
+    assert a["show"] == "Severance" and not a["loading"]
+    # TMDB (faked) has 3 aired episodes per season: S1E3 then S2E1..3, by name
+    assert [e["label"] for e in a["episodes"]] == [
+        "S1E3 · Episode 1.3", "S2E1 · Episode 2.1", "S2E2 · Episode 2.2", "S2E3 · Episode 2.3"]
+
+    with pytest.raises(Exception):   # nothing chosen yet: refuses, changes nothing
+        await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    assert fake_trakt["added"] == []
+
+    await hass.services.async_call("select", "select_option", {"entity_id": ep, "option": "S2E2 · Episode 2.2"}, blocking=True)
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    assert hub.library.data["items"]["tv:95396"]["progress"] == {"season": 2, "episode": 2}
+    (payload,) = fake_trakt["added"]       # only S2E1 and S2E2: not S2E3, nothing Trakt had
+    assert payload["shows"][0]["seasons"] == [{"number": 2, "episodes": [
+        {"number": 1, "watched_at": "released"}, {"number": 2, "watched_at": "released"}]}]
+    # the list now starts after the new position
+    assert [e["label"] for e in hass.states.get(ep).attributes["episodes"]] == ["S2E3 · Episode 2.3"]
+
+    res = await call(hass, "unwatched_episodes", title="Severance")
+    assert [(e["season"], e["episode"]) for e in res["episodes"]] == [(2, 3)]
+
+
+async def test_up_next_is_split_into_available_coming_soon_and_finished(hass, setup):
+    from datetime import date
+    from custom_components.tvtracker.logic import up_next_group
+    assert up_next_group("watching", None) == "available"
+    assert up_next_group("caught_up", "2026-10-11") == "coming_soon"
+    assert up_next_group("caught_up", None) == "finished"
+    assert up_next_group("finished", None) == "finished"
+    assert up_next_group("want_to_watch", None) is None
+
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "mark_watched", title="Severance")
+    item = hub.library.data["items"]["tv:95396"]
+    today = date.fromisoformat(item["last_watched"][:10])
+    item["details"]["status"] = "Ended"
+    (v,) = [v for v in hub.library.continue_watching(today) if v["key"] == "tv:95396"]
+    assert (v["status"], v["group"]) == ("finished", "finished")   # a finished show is still shown, for a while
+    assert hub.library.continue_watching(today.replace(year=today.year + 1)) == []

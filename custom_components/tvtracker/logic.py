@@ -507,8 +507,23 @@ def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
                 else None
             ),
             next_air_date=nxt.get("air_date") or None,
+            announced_season=_announced_season(raw.get("seasons") or [], last.get("season_number")),
         )
     return details
+
+
+def _announced_season(seasons: list[dict[str, Any]], last_aired_season: int | None) -> dict[str, Any] | None:
+    """The first season after the one airing/aired last, if TMDB lists one (a renewal
+    is often listed long before any episode has a date)."""
+    if not last_aired_season:
+        return None
+    later = sorted(
+        (s for s in seasons if (s.get("season_number") or 0) > last_aired_season),
+        key=lambda s: s["season_number"],
+    )
+    if not later:
+        return None
+    return {"season": int(later[0]["season_number"]), "air_date": later[0].get("air_date") or None}
 
 
 # --------------------------------------------------------------------------
@@ -807,6 +822,22 @@ def derive_status(item: dict[str, Any], today: date) -> str:
     return "finished" if details.get("status") in ("Ended", "Canceled") else "caught_up"
 
 
+def up_next_group(
+    status: str, next_air_date: str | None, announced_season: dict[str, Any] | None = None
+) -> str | None:
+    """Where a show sits under Up Next: "available" (the next episode is out),
+    "coming_soon" (you're caught up and another episode or a new season is on the
+    way, dated or not) or "finished" (ended, or nothing more announced). A finished
+    show moves back as soon as TMDB lists a new season."""
+    if status == "watching":
+        return "available"
+    if status in ("caught_up", "finished") and (next_air_date or announced_season):
+        return "coming_soon"
+    if status in ("caught_up", "finished"):
+        return "finished"
+    return None
+
+
 def _pretty_date(text: str | None) -> str | None:
     d = _parse_date(text)
     return f"{d.day} {d:%b %Y}" if d else None
@@ -857,7 +888,7 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
     }
 
 
-_COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
+COUNTRY_SUFFIX = re.compile(r"[\s(]+(?:us|uk|au|ca)\)?\s*$", re.I)
 
 
 _TRAILING_NUMBER = re.compile(r"\s+\d{1,3}\s*$")
@@ -884,10 +915,10 @@ def match_score(
         if norm_title(cand) == target:
             return True
         # "Ghosts US" / "Ghosts (UK)" vs "Ghosts" (and the other way round)
-        stripped = _COUNTRY_SUFFIX.sub("", cand)
+        stripped = COUNTRY_SUFFIX.sub("", cand)
         if stripped != cand and norm_title(stripped) == target:
             return True
-        if norm_title(_COUNTRY_SUFFIX.sub("", item_title)) == norm_title(cand):
+        if norm_title(COUNTRY_SUFFIX.sub("", item_title)) == norm_title(cand):
             return True
         # "Severance - S2E4", "Severance: The Chair"
         low = cand.lower().lstrip()

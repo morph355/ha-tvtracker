@@ -65,6 +65,25 @@ set_watch_service:
     tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
     media_type: {selector: {select: {options: [tv, movie]}}}
 
+watched_up_to:
+  name: Watched up to an episode
+  description: You've watched everything up to and including this episode. Sets where you are, and adds any of those episodes Trakt hasn't got (never deletes).
+  fields:
+    season: {required: true, selector: {number: {min: 1, max: 100, mode: box}}}
+    episode: {required: true, selector: {number: {min: 1, max: 1000, mode: box}}}
+    trakt: {description: Also add the missing episodes to Trakt, default: true, selector: {boolean: {}}}
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv]}}}
+
+unwatched_episodes:
+  name: Unwatched episodes
+  description: The aired episodes of a show after where you are, with their names.
+  fields:
+    title: {selector: {text: {}}}
+    tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
+    media_type: {selector: {select: {options: [tv]}}}
+
 log_watch:
   name: Log a viewing
   description: Add a viewing the TVs didn't capture. Updates watch progress for shows and movies.

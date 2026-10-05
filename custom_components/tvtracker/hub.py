@@ -30,10 +30,12 @@ from .const import (
     TRAKT_INITIAL_DAYS,
     TRAKT_SYNC_HOURS,
     TRAKT_SYNC_OVERLAP_DAYS,
+    MAX_PICKER_EPISODES,
     WATCHED_FRACTION,
 )
 from .library import Library, item_key
 from .logic import (
+    COUNTRY_SUFFIX,
     MEDIA_SESSION_CMD,
     RoomTracker,
     analyse_trakt_progress,
@@ -52,7 +54,7 @@ from .logic import (
     parse_trakt_watched_movies,
     response_timestamp,
 )
-from .tmdb import TMDB, TMDBError
+from .tmdb import TMDB, TMDBAuthError, TMDBError
 from .trakt import TraktAuthError, TraktClient, TraktError
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,6 +77,8 @@ class TVTrackerHub:
         self._outbox_lock = asyncio.Lock()
         self._sleep = asyncio.sleep
         self.search_text = ""        # what you typed into the "show search" box
+        # the "watched up to" picker: the chosen show, its unwatched episodes, the chosen one
+        self.picker: dict[str, Any] = {"key": None, "episodes": [], "choice": None, "loading": False}
         self.last_episode_search: dict[str, Any] = {}
         self.rooms = rooms
         self.store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -369,6 +373,9 @@ class TVTrackerHub:
         if seconds < MIN_SESSION_SECONDS:
             return
         lib = self.library
+        if self._needs_lookup(session):
+            self.hass.async_create_task(self._lookup_then_record(session))
+            return
         key = lib.apply_session(session, MIN_COUNT_SECONDS)
         if key is None and session.get("_candidates"):
             # Several shows might be the one: nothing is applied yet, but work out now
@@ -381,6 +388,11 @@ class TVTrackerHub:
         if session["category"] != "youtube" and lib.add_service(session["service"]):
             _LOGGER.info("Added new streaming service: %s", session["service"])
         item = lib.data["items"].get(key) if key else None
+        guess = session.get("_guess") if session.get("_counted") else None
+        if guess and session["service"] in TRAKT_PUSH_SERVICES:
+            # The TV gave only a show title, so the episode is a guess; Trakt can't be
+            # told until you've confirmed it.
+            session.update(season=guess["season"], episode=guess["episode"])
         if key and session.get("_counted") and self.trakt:
             self._queue_session_for_trakt(key, session)
         lib.add_history(
@@ -400,7 +412,10 @@ class TVTrackerHub:
                 "episode": session.get("episode"),
                 "channel": session.get("channel"),
                 "item_key": key,
-                "probable": (bool(session.get("_found")) and key is not None) or bool(session.get("_candidates")),
+                "probable": (bool(session.get("_found")) and key is not None)
+                or bool(session.get("_candidates"))
+                or bool(guess and session["service"] in TRAKT_PUSH_SERVICES),
+                "previous_progress": guess and {"progress": guess["previous"], "source": guess["previous_source"]},
                 "candidates": session.get("_candidates"),
                 "counted": bool(session.get("_counted")),
                 "watched_pct": (
@@ -413,6 +428,35 @@ class TVTrackerHub:
         )
         self.changed()
 
+    def _needs_lookup(self, session: dict[str, Any]) -> bool:
+        """A programme titled like a show we don't track yet (BBC iPlayer sends just
+        "Colin from Accounts"): look it up on TMDB so it is tracked from now on."""
+        return bool(
+            self.tmdb is not None
+            and session["category"] == "tv_movies"
+            and session.get("title")
+            and not session.get("_looked_up")
+            and not session.get("_candidates")
+            and self.library.match_session(session) is None
+        )
+
+    async def _lookup_then_record(self, session: dict[str, Any]) -> None:
+        session["_looked_up"] = True
+        title = session["title"]
+        try:
+            for query in dict.fromkeys([title, COUNTRY_SUFFIX.sub("", title).strip()]):
+                exact = [
+                    r for r in await self.tmdb.search(query, None)
+                    if norm_title(r["title"]) == norm_title(query)
+                ]
+                if len(exact) == 1:  # more than one (two shows, one title) is not a safe guess
+                    await self.fetch_item(exact[0]["media_type"], exact[0]["tmdb_id"])
+                    _LOGGER.info("Now tracking %s (seen on %s)", exact[0]["title"], session["service"])
+                    break
+        except TMDBError as err:
+            _LOGGER.debug("TMDB lookup for %s failed: %s", title, err)
+        self._record(session)
+
     # ---- TMDB ------------------------------------------------------------
     async def fetch_item(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
         details, providers = await self.tmdb.details(media_type, tmdb_id)
@@ -424,9 +468,11 @@ class TVTrackerHub:
         for item in list(self.library.data["items"].values()):
             try:
                 await self.fetch_item(item["media_type"], item["tmdb_id"])
-            except TMDBError as err:
+            except TMDBAuthError as err:
+                _LOGGER.warning("Could not refresh from TMDB: %s", err)
+                break
+            except TMDBError as err:  # one bad item mustn't stop the rest being refreshed
                 _LOGGER.warning("Could not refresh %s: %s", item["title"], err)
-                return
         self.changed()
 
     async def _scheduled_refresh(self, _now: datetime) -> None:
@@ -702,8 +748,69 @@ class TVTrackerHub:
         self._notify("trakt", "Trakt disconnected", f"{err}. Run tvtracker.trakt_connect.")
         self.changed()
 
-    async def async_trakt_mark_watched(self, key: str, dry_run: bool = False) -> dict[str, Any]:
-        """Add to Trakt every aired episode (or the film) it doesn't have a watch for.
+    # ---- "watched up to" picker -------------------------------------------
+    def picker_shows(self) -> dict[str, str]:
+        """Shows to choose from (label -> item key): Up Next and watchlists."""
+        today = dt_util.now().date()
+        views = self.library.continue_watching(today) + [
+            v for items in self.library.watchlists(today).values() for v in items
+        ]
+        out: dict[str, str] = {}
+        for v in views:
+            if v["type"] != "tv" or v["key"] in out.values():
+                continue
+            label = v["title"] if v["title"] not in out else f"{v['title']} ({v['year']})"
+            out[label] = v["key"]
+        return out
+
+    async def async_pick_show(self, key: str) -> None:
+        """Load the chosen show's unwatched episodes (names from TMDB)."""
+        self.picker = {"key": key, "episodes": [], "choice": None, "loading": True}
+        self.changed()
+        try:
+            await self._load_picker_episodes()
+        finally:
+            self.picker["loading"] = False
+            self.changed()
+
+    async def _load_picker_episodes(self) -> None:
+        key = self.picker["key"]
+        item = self.library.data["items"].get(key or "")
+        if item is None:
+            return
+        start = (item.get("progress") or {}).get("season") or 1
+        seasons = [int(x) for x in (item.get("details") or {}).get("seasons") or {} if int(x) >= start]
+        try:
+            names = await self.episode_names(item, seasons)
+        except TMDBError as err:
+            _LOGGER.warning("Could not load the episodes of %s: %s", item["title"], err)
+            names = []
+        eps = self.library.unwatched_episodes(key, names, dt_util.now().date())[:MAX_PICKER_EPISODES]
+        self.picker["episodes"] = [
+            {"label": f"S{e['season']}E{e['episode']} · {e['name'] or 'Episode ' + str(e['episode'])}",
+             "season": e["season"], "episode": e["episode"], "air_date": e.get("air_date")}
+            for e in eps
+        ]
+        self.picker["choice"] = None
+
+    async def async_watched_up_to(self, key: str, season: int, episode: int, trakt: bool = True) -> dict[str, Any]:
+        """You've watched everything up to and including S<season>E<episode>: set that
+        as where you are, and add any of those episodes Trakt hasn't got (never deletes)."""
+        item = self.library.get_item(key)
+        self.library.set_progress(key, season, episode, dt_util.utcnow(), source="manual")
+        result: dict[str, Any] = {"title": item["title"], "progress": f"S{season}E{episode}"}
+        if trakt and self.trakt is not None and self.trakt_status == "connected":
+            result["trakt"] = await self.async_trakt_mark_watched(key, upto=(season, episode))
+        if self.picker.get("key") == key:
+            await self._load_picker_episodes()
+        self.changed()
+        return result
+
+    async def async_trakt_mark_watched(
+        self, key: str, dry_run: bool = False, upto: tuple[int, int] | None = None
+    ) -> dict[str, Any]:
+        """Add to Trakt every aired episode (or the film) it doesn't have a watch for,
+        or with `upto` only those up to and including that episode.
 
         Trakt is asked what you've already watched first, so nothing is watched
         twice; new watches are dated to when each episode aired. Never deletes.
@@ -730,6 +837,7 @@ class TVTrackerHub:
                     {"media_type": "tv", "tmdb_id": item["tmdb_id"], "ids": {"trakt": trakt_id},
                      "season": s, "episode": e, "watched_at": "released"}
                     for s, e in info["missing"]
+                    if upto is None or (s, e) <= tuple(upto)
                 ]
                 already = info["completed"]
                 extra = {
@@ -858,11 +966,12 @@ class TVTrackerHub:
         lib = self.library
         old = lib.data["items"].get(entry.get("item_key") or "")
         if (
-            old is not None and old is not keep and old.get("progress_source") == "found"
+            old is not None and old is not keep and old.get("progress_source") in ("found", "guess")
             and old.get("progress") == {"season": entry.get("season"), "episode": entry.get("episode")}
         ):
-            old["progress"], old["progress_source"] = None, None
-            if not old["lists"]:
+            before = entry.get("previous_progress") or {}
+            old["progress"], old["progress_source"] = before.get("progress"), before.get("source")
+            if not old["lists"] and not old["progress"]:
                 del lib.data["items"][old["key"]]
 
     async def _make_certain(self, entry: dict[str, Any], item: dict[str, Any], season: int, episode: int, name: str) -> dict[str, Any]:

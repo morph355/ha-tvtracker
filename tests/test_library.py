@@ -259,3 +259,17 @@ def test_films_are_not_listed_under_up_next():
     lib.mark_watched("movie:1", True, NOW)
     lib.set_progress("tv:95396", 1, 2, NOW)
     assert [v["key"] for v in lib.continue_watching(TODAY)] == ["tv:95396"]
+
+
+def test_rewatching_when_the_next_episode_is_not_out_yet_guesses_nothing():
+    """Caught up at the latest aired episode, the show's title seen again (a re-watch):
+    the "next" episode hasn't aired, so progress stays and nothing is asked."""
+    lib = make_lib()
+    item = lib.data["items"]["tv:95396"]
+    item["details"]["last_aired"] = last = {"season": 2, "episode": 5}   # S2E6 listed, not aired yet
+    lib.set_progress("tv:95396", last["season"], last["episode"], NOW, source="manual")
+    s = session("Severance")
+    assert lib.apply_session(s, 600) == "tv:95396"
+    assert item["progress"] == {"season": last["season"], "episode": last["episode"]}
+    assert item["progress_source"] == "manual" and "_guess" not in s
+    assert not lib.episode_unknown("tv:95396")

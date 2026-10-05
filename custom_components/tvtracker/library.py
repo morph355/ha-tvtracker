@@ -20,6 +20,14 @@ from .logic import (
 )
 
 
+def _after_latest(details: dict[str, Any], episode: tuple[int, int], last: dict[str, int]) -> bool:
+    """Is `episode` later than the latest episode that has aired?"""
+    from .logic import episode_index
+
+    seasons = {int(k): int(v) for k, v in (details.get("seasons") or {}).items()}
+    return episode_index(seasons, *episode) > episode_index(seasons, last["season"], last["episode"])
+
+
 def item_key(media_type: str, tmdb_id: int) -> str:
     return f"{media_type}:{int(tmdb_id)}"
 
@@ -349,6 +357,10 @@ class Library:
                 nxt = (last["season"], last["episode"])
             else:
                 nxt = next_episode(item["details"], item.get("progress"))
+                if nxt and last and _after_latest(details, nxt, last):
+                    # the next one isn't out yet: you re-watched one you'd seen (often
+                    # the latest). Nothing to guess, and nothing to ask you about.
+                    return key
             if not nxt:
                 item["episode_unknown"] = True
             if nxt:

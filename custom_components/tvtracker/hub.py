@@ -444,11 +444,18 @@ class TVTrackerHub:
     async def _find_on_tmdb(self, title: str) -> dict[str, Any] | None:
         """The one TMDB show/film with exactly this title (also tried without a
         country suffix like "US"); None when there's none, or several."""
+        suffix = COUNTRY_SUFFIX.search(title)
+        country = suffix and {"US": "US", "UK": "GB", "AU": "AU", "CA": "CA"}.get(
+            suffix.group(0).strip(" ()").upper()
+        )
         for query in dict.fromkeys([title, COUNTRY_SUFFIX.sub("", title).strip()]):
             exact = [
                 r for r in await self.tmdb.search(query, None)
                 if norm_title(r["title"]) == norm_title(query)
             ]
+            if len(exact) > 1 and country:
+                # "Ghosts US": of the shows called Ghosts, the American one
+                exact = [r for r in exact if country in (r.get("origin_country") or [])]
             if len(exact) == 1:  # more than one (two shows, one title) is not a safe guess
                 return exact[0]
         return None

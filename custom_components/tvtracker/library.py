@@ -309,6 +309,12 @@ class Library:
             self.set_watch_service(key, session["service"])
         seconds = (session["end"] - session["start"]).total_seconds()
         item = self.data["items"][key]
+        if (
+            item["media_type"] == "tv" and not item.get("progress")
+            and not (session.get("season") or session.get("episode"))
+        ):
+            # watched (even briefly) with only the show's title: which episode is unknown
+            item["episode_unknown"] = True
         fraction = self.watched_fraction(session, item, seconds)
         session["_fraction"] = fraction
         counts = fraction >= WATCHED_FRACTION if fraction is not None else seconds >= min_count_seconds

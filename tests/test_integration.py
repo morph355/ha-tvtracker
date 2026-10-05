@@ -1548,3 +1548,27 @@ async def test_past_viewings_of_an_untracked_show_are_linked_and_offered_for_cat
     n = len(searches)
     assert (await hub.async_track_past_titles())["tracked"] == []
     assert len(searches) == n                       # not looked up again
+
+
+async def test_a_country_suffix_picks_the_right_one_of_two_shows_with_the_same_name(hass, setup, freezer):
+    """BBC iPlayer's "Ghosts US": TMDB has an American and a British "Ghosts". The
+    suffix says which; even a short viewing tracks it, with the episode unknown."""
+    hub = hass.data[DOMAIN][setup.entry_id]
+    orig = hub.tmdb.search
+
+    async def two_ghosts(query, media_type=None):
+        if query.lower().startswith("ghosts"):
+            return [{"tmdb_id": 4242, "media_type": "tv", "title": "Ghosts", "year": "2021", "origin_country": ["US"]},
+                    {"tmdb_id": 79788, "media_type": "tv", "title": "Ghosts", "year": "2019", "origin_country": ["GB"]}]
+        return await orig(query, media_type)
+
+    hub.tmdb.search = two_ghosts
+    await _watch_on_bedroom(hass, freezer, {"app_name": "BBC iPlayer", "media_title": "Ghosts US"}, minutes=5)
+    assert "tv:79788" not in hub.library.data["items"]
+    item = hub.library.data["items"]["tv:4242"]
+    assert item["progress"] is None and hub.library.episode_unknown("tv:4242")
+    assert hass.states.get("select.tv_tracker_pick_show").attributes["options"] == ["—", "Ghosts"]
+    assert hub.library.data["history"][-1]["item_key"] == "tv:4242"
+
+    # with no suffix, two shows of that name is too uncertain: nothing is added
+    assert await hub._find_on_tmdb("Ghosts") is None

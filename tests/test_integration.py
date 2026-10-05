@@ -279,7 +279,7 @@ async def test_dashboard_templates_render(hass, setup, freezer):
     assert "**Family Room** — off" in out["Watching / Now watching"]
     assert "**Severance** — next **S1E4** · on Apple TV" in out["Watching / Up next — available to watch"]
     assert "**Ghosts** — season 2 announced, no date yet" in out["Watching / Up next — coming soon"]
-    assert "Choose a show above" in out["Catch up / Unwatched episodes"]
+    assert "Nothing to catch up on" in out["Catch up / Unwatched episodes"]
     assert "### Shows" in out["Watchlists / Watchlists"] and "### Movies" in out["Watchlists / Watchlists"]
     assert "Dune" in out["Watchlists / Watchlists"] and "Watch on Netflix" in out["Watchlists / Watchlists"]
     assert "Severance" in out["TV & Movies / Recently watched"] and "S1E3" in out["TV & Movies / Recently watched"]
@@ -1450,7 +1450,7 @@ async def test_an_ambiguous_or_unknown_title_is_not_added_on_a_guess(hass, setup
     assert hub.library.data["history"][-1]["title"] == "A Film Nobody Tracks"
 
 
-async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_it(hass, setup_trakt, fake_trakt):
+async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_it(hass, setup_trakt, fake_trakt, freezer):
     """Choose a show, see its unwatched episodes by name, choose the last one you've
     seen: HA moves there and Trakt gets only what it hasn't got, up to that episode."""
     hub = setup_trakt
@@ -1459,17 +1459,20 @@ async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_
         {"number": 1, "episodes": [{"number": n, "completed": True} for n in range(1, 10)]},
         {"number": 2, "episodes": [{"number": n, "completed": False} for n in range(1, 4)]}]}
     await call(hass, "add_to_list", list="Shows", title="Severance")
-    await call(hass, "set_progress", title="Severance", season=1, episode=2)
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    await call(hass, "set_progress", title="Ghosts", season=1, episode=2)   # we know where you are: not offered
+    # Apple TV gave only the show's title: the episode is a guess (S1E1)
+    await _watch_on_bedroom(hass, freezer, {"app_name": "Apple TV", "media_title": "Severance"})
 
     show, ep, button = "select.tv_tracker_pick_show", "select.tv_tracker_watched_up_to", "button.tv_tracker_mark_watched_up_to"
-    assert "Severance" in hass.states.get(show).attributes["options"]
+    assert hass.states.get(show).attributes["options"] == ["—", "Severance"]
     await hass.services.async_call("select", "select_option", {"entity_id": show, "option": "Severance"}, blocking=True)
     await hass.async_block_till_done()
     a = hass.states.get(ep).attributes
     assert a["show"] == "Severance" and not a["loading"]
-    # TMDB (faked) has 3 aired episodes per season: S1E3 then S2E1..3, by name
+    # TMDB (faked) has 3 aired episodes per season, after the guessed S1E1, by name
     assert [e["label"] for e in a["episodes"]] == [
-        "S1E3 · Episode 1.3", "S2E1 · Episode 2.1", "S2E2 · Episode 2.2", "S2E3 · Episode 2.3"]
+        "S1E2 · Episode 1.2", "S1E3 · Episode 1.3", "S2E1 · Episode 2.1", "S2E2 · Episode 2.2", "S2E3 · Episode 2.3"]
 
     with pytest.raises(Exception):   # nothing chosen yet: refuses, changes nothing
         await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
@@ -1482,8 +1485,10 @@ async def test_pick_a_show_then_the_last_episode_watched_marks_everything_up_to_
     (payload,) = fake_trakt["added"]       # only S2E1 and S2E2: not S2E3, nothing Trakt had
     assert payload["shows"][0]["seasons"] == [{"number": 2, "episodes": [
         {"number": 1, "watched_at": "released"}, {"number": 2, "watched_at": "released"}]}]
-    # the list now starts after the new position
+    # the list now starts after the new position; the show is no longer "unknown",
+    # it only stays offered because it's the one you have chosen
     assert [e["label"] for e in hass.states.get(ep).attributes["episodes"]] == ["S2E3 · Episode 2.3"]
+    assert not hub.library.episode_unknown("tv:95396")
 
     res = await call(hass, "unwatched_episodes", title="Severance")
     assert [(e["season"], e["episode"]) for e in res["episodes"]] == [(2, 3)]
@@ -1507,3 +1512,39 @@ async def test_up_next_is_split_into_available_coming_soon_and_finished(hass, se
     (v,) = [v for v in hub.library.continue_watching(today) if v["key"] == "tv:95396"]
     assert (v["status"], v["group"]) == ("finished", "finished")   # a finished show is still shown, for a while
     assert hub.library.continue_watching(today.replace(year=today.year + 1)) == []
+
+
+
+async def test_past_viewings_of_an_untracked_show_are_linked_and_offered_for_catch_up(hass, setup_trakt, fake_trakt):
+    """Viewings logged before new shows were tracked ("The Celebrity Traitors" on
+    iPlayer, title only): the show is tracked, its viewings linked, and it's offered
+    under "Where are you up to?". Nothing goes to Trakt, and each title is looked up once."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    for title, start in (("Ghosts US", "2026-10-04T17:22:04+00:00"), ("Ghosts US", "2026-10-04T18:00:00+00:00"),
+                         ("A Film Nobody Tracks", "2026-10-04T19:00:00+00:00")):
+        hub.library.add_history({"start": start, "end": start, "room": "Living Room", "category": "tv_movies",
+                                 "service": "BBC iPlayer", "title": title, "item_key": None, "source": "auto"})
+    searches = []
+    orig = hub.tmdb.search
+
+    async def counting(query, media_type=None):
+        searches.append(query)
+        return await orig(query, media_type)
+
+    hub.tmdb.search = counting
+    res = await hub.async_track_past_titles()
+    assert res == {"tracked": ["Ghosts"], "not_found": ["A Film Nobody Tracks"]}
+    item = hub.library.data["items"]["tv:4242"]
+    assert item["progress"] is None and hub.library.episode_unknown("tv:4242")
+    assert item["watch_on"] == ["BBC iPlayer"] and item["last_watched"].startswith("2026-10-04T18:00")
+    linked = [h for h in hub.library.data["history"] if h.get("item_key") == "tv:4242"]
+    assert len(linked) == 2 and all(h["title"] == "Ghosts" for h in linked)
+    hub.changed()
+    await hass.async_block_till_done()
+    assert hass.states.get("select.tv_tracker_pick_show").attributes["options"] == ["—", "Ghosts"]
+    assert fake_trakt["added"] == []
+
+    n = len(searches)
+    assert (await hub.async_track_past_titles())["tracked"] == []
+    assert len(searches) == n                       # not looked up again

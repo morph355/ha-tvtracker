@@ -121,6 +121,7 @@ class TVTrackerHub:
             )
             self.hass.async_create_task(self.async_trakt_sync())
         self.hass.async_create_task(self.async_refresh_all())
+        self.hass.async_create_task(self.async_track_past_titles())
 
     async def async_stop(self) -> None:
         for unsub in self._unsubs:
@@ -440,22 +441,71 @@ class TVTrackerHub:
             and self.library.match_session(session) is None
         )
 
+    async def _find_on_tmdb(self, title: str) -> dict[str, Any] | None:
+        """The one TMDB show/film with exactly this title (also tried without a
+        country suffix like "US"); None when there's none, or several."""
+        for query in dict.fromkeys([title, COUNTRY_SUFFIX.sub("", title).strip()]):
+            exact = [
+                r for r in await self.tmdb.search(query, None)
+                if norm_title(r["title"]) == norm_title(query)
+            ]
+            if len(exact) == 1:  # more than one (two shows, one title) is not a safe guess
+                return exact[0]
+        return None
+
     async def _lookup_then_record(self, session: dict[str, Any]) -> None:
         session["_looked_up"] = True
         title = session["title"]
         try:
-            for query in dict.fromkeys([title, COUNTRY_SUFFIX.sub("", title).strip()]):
-                exact = [
-                    r for r in await self.tmdb.search(query, None)
-                    if norm_title(r["title"]) == norm_title(query)
-                ]
-                if len(exact) == 1:  # more than one (two shows, one title) is not a safe guess
-                    await self.fetch_item(exact[0]["media_type"], exact[0]["tmdb_id"])
-                    _LOGGER.info("Now tracking %s (seen on %s)", exact[0]["title"], session["service"])
-                    break
+            hit = await self._find_on_tmdb(title)
+            if hit:
+                await self.fetch_item(hit["media_type"], hit["tmdb_id"])
+                _LOGGER.info("Now tracking %s (seen on %s)", hit["title"], session["service"])
         except TMDBError as err:
             _LOGGER.debug("TMDB lookup for %s failed: %s", title, err)
         self._record(session)
+
+    async def async_track_past_titles(self) -> dict[str, Any]:
+        """Viewings logged with a show's title but no show (from before new shows
+        were tracked, e.g. BBC iPlayer's "The Celebrity Traitors"): track the show,
+        link the viewings to it, and mark the episode as unknown so it is offered
+        under "Where are you up to?". Nothing is sent to Trakt. Each title is
+        looked up once."""
+        lib = self.library
+        tried: list[str] = lib.data.setdefault("looked_up_titles", [])
+        result: dict[str, Any] = {"tracked": [], "not_found": []}
+        rows = [
+            h for h in lib.data["history"]
+            if h.get("category") == "tv_movies" and h.get("title") and not h.get("item_key")
+            and h.get("source") == "auto" and not h.get("candidates") and not h.get("probable")
+        ]
+        for title in dict.fromkeys(h["title"] for h in rows):
+            if norm_title(title) in tried:
+                continue
+            try:
+                hit = await self._find_on_tmdb(title)
+                item = await self.fetch_item("tv", hit["tmdb_id"]) if hit and hit["media_type"] == "tv" else None
+            except TMDBError as err:
+                _LOGGER.debug("TMDB lookup for %s failed: %s", title, err)
+                continue  # try again next time
+            tried.append(norm_title(title))
+            if item is None:  # films are left alone for now
+                result["not_found"].append(title)
+                continue
+            for h in rows:
+                if h["title"] == title:
+                    h.update(item_key=item["key"], title=item["title"])
+                    if h.get("service"):
+                        lib.set_watch_service(item["key"], h["service"])
+                    if (h.get("end") or "") > (item.get("last_watched") or ""):
+                        item["last_watched"] = h["end"]
+            if not item.get("progress"):
+                item["episode_unknown"] = True
+            result["tracked"].append(item["title"])
+        if result["tracked"]:
+            _LOGGER.info("Now tracking from past viewings: %s", ", ".join(result["tracked"]))
+        self.changed()
+        return result
 
     # ---- TMDB ------------------------------------------------------------
     async def fetch_item(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
@@ -750,14 +800,19 @@ class TVTrackerHub:
 
     # ---- "watched up to" picker -------------------------------------------
     def picker_shows(self) -> dict[str, str]:
-        """Shows to choose from (label -> item key): Up Next and watchlists."""
-        today = dt_util.now().date()
-        views = self.library.continue_watching(today) + [
-            v for items in self.library.watchlists(today).values() for v in items
+        """Shows to choose from (label -> item key): the ones you've watched where we
+        don't know which episode you're on (only the show's title was seen), most
+        recently watched first. The one already chosen stays until you've used it."""
+        items = self.library.data["items"]
+        keys = [
+            k for k, it in items.items()
+            if it["media_type"] == "tv" and not it.get("hidden")
+            and (self.library.episode_unknown(k) or k == self.picker.get("key"))
         ]
+        keys.sort(key=lambda k: items[k].get("last_watched") or "", reverse=True)
         out: dict[str, str] = {}
-        for v in views:
-            if v["type"] != "tv" or v["key"] in out.values():
+        for v in (self.library.view(k, dt_util.now().date()) for k in keys):
+            if v["key"] in out.values():
                 continue
             label = v["title"] if v["title"] not in out else f"{v['title']} ({v['year']})"
             out[label] = v["key"]
@@ -785,7 +840,8 @@ class TVTrackerHub:
         except TMDBError as err:
             _LOGGER.warning("Could not load the episodes of %s: %s", item["title"], err)
             names = []
-        eps = self.library.unwatched_episodes(key, names, dt_util.now().date())[:MAX_PICKER_EPISODES]
+        # too many to list: keep the newest (the one you've reached is usually recent)
+        eps = self.library.unwatched_episodes(key, names, dt_util.now().date())[-MAX_PICKER_EPISODES:]
         self.picker["episodes"] = [
             {"label": f"S{e['season']}E{e['episode']} · {e['name'] or 'Episode ' + str(e['episode'])}",
              "season": e["season"], "episode": e["episode"], "air_date": e.get("air_date")}

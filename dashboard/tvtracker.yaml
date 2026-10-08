@@ -230,6 +230,8 @@ views:
       # seen all of, including what Trakt says you've watched) are left off.
       - type: entities
         entities:
+          - entity: select.tv_tracker_watchlist
+            name: List
           - entity: select.tv_tracker_genre
             name: Genre
       - type: markdown

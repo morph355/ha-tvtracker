@@ -1609,6 +1609,7 @@ async def test_shows_whose_next_episode_is_due_are_refreshed_hourly(hass, setup)
     await call(hass, "add_to_list", list="Shows", title="Severance")
     await call(hass, "add_to_list", list="Shows", title="Ghosts")
     hub.library.data["items"]["tv:95396"]["details"]["next_air_date"] = "2020-01-01"   # due: refetched
+    hub.library.data["items"]["tv:4242"]["details"]["next_air_date"] = "2999-01-01"    # not due yet
     fetched = []
     orig = hub.fetch_item
 

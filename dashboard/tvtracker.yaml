@@ -226,17 +226,27 @@ views:
     path: watchlists
     icon: mdi:playlist-play
     cards:
+      # Things you've finished (a film you've watched, a show that has ended and you've
+      # seen all of, including what Trakt says you've watched) are left off.
+      - type: entities
+        entities:
+          - entity: select.tv_tracker_genre
+            name: Genre
       - type: markdown
         title: Watchlists
         content: |-
           {% set lists = state_attr('sensor.tv_tracker_watchlists', 'lists') or {} -%}
+          {% set genre = state_attr('sensor.tv_tracker_watchlists', 'genre') -%}
           {% if lists | length == 0 -%}
           No watchlists yet. Ask Claude to create one, or call `tvtracker.create_list`.
           {% endif -%}
           {% for name, items in lists.items() -%}
           ### {{ name }}
+          {% if items | length == 0 -%}
+          {{ 'Nothing in ' ~ genre ~ '.' if genre else 'Nothing left to watch.' }}
+          {% endif -%}
           {% for v in items -%}
-          - **{{ v.title }}** ({{ 'TV' if v.type == 'tv' else 'Movie' }}{% if v.year %}, {{ v.year }}{% endif %}) — {{ v.status | replace('_', ' ') }}{% if v.progress and v.status != 'finished' %}, at {{ v.progress }}{% endif %}{% if v.next and v.status == 'want_to_watch' %}, start {{ v.next }}{% endif %} — {{ v.availability }}
+          - **{{ v.title }}** ({{ 'TV' if v.type == 'tv' else 'Movie' }}{% if v.year %}, {{ v.year }}{% endif %}) — {{ v.status | replace('_', ' ') }}{% if v.progress %}, at {{ v.progress }}{% endif %}{% if v.next and v.status == 'want_to_watch' %}, start {{ v.next }}{% endif %} — {{ v.availability }}{% if v.genres %} · *{{ v.genres | join(', ') }}*{% endif %}
           {% endfor %}
 
           {% endfor %}

@@ -129,3 +129,9 @@ pytest
 ```
 
 `logic.py` and `library.py` have no Home Assistant imports and their tests run on any Python; `tests/test_integration.py` runs the whole integration against real Home Assistant core with TMDB faked.
+
+### Watchlists and Trakt
+
+- Your Trakt watchlist is copied into a list called **Watchlist**, and each of your own Trakt lists into a list of the same name. Only additions: each Trakt entry is copied once, so something you take off a list here isn't put back, and nothing is changed on Trakt.
+- Watchlists leave off what you've finished (a watched film, a show that has ended and you've seen all of). Trakt's full watched record is checked on every sync, so things you watched long ago count too.
+- The **Genre** dropdown on the Watchlists tab shows one genre at a time.

@@ -433,6 +433,18 @@ def fake_trakt(monkeypatch):
     async def watched_movies(self, token):
         return list(state["watched_movies"])
 
+    async def watched_shows(self, token):
+        return list(state.get("watched_shows", []))
+
+    async def watchlist(self, token):
+        return list(state.get("watchlist", []))
+
+    async def my_lists(self, token):
+        return list(state.get("my_lists", []))
+
+    async def list_items(self, token, list_id):
+        return list(state.get("list_items", {}).get(list_id, []))
+
     async def add_history(self, token, payload):
         if state["add_error"]:
             raise state["add_error"]
@@ -456,7 +468,7 @@ def fake_trakt(monkeypatch):
 
     for name, fn in (("device_code", device_code), ("poll_token", poll_token),
                      ("refresh", refresh), ("history", history), ("find_show", find_show), ("show_progress", show_progress),
-                     ("watched_movies", watched_movies), ("add_history", add_history),
+                     ("watched_movies", watched_movies), ("watched_shows", watched_shows), ("watchlist", watchlist), ("my_lists", my_lists), ("list_items", list_items), ("add_history", add_history),
                      ("hide", hide), ("unhide", unhide), ("search_episodes", search_episodes)):
         monkeypatch.setattr(f"custom_components.tvtracker.trakt.TraktClient.{name}", fn)
     return state
@@ -1622,3 +1634,75 @@ async def test_shows_whose_next_episode_is_due_are_refreshed_hourly(hass, setup)
     assert fetched == [95396]
     # TMDB's fresh copy has no past date any more, so it isn't fetched again
     assert await hub._refresh_due() == 0
+
+
+async def test_trakt_watched_record_updates_watchlist_items_and_finished_ones_drop_off(hass, setup_trakt, fake_trakt):
+    """A film watched years ago (before the history import window) and the furthest
+    episode of a show, from Trakt's full watched record: only for watchlist items."""
+    hub = setup_trakt
+    await _connect(hass, hub)
+    await call(hass, "add_to_list", list="Films", title="Dune")
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    fake_trakt["watched_movies"] = [{"last_watched_at": "2019-01-01T20:00:00.000Z", "movie": {"ids": {"tmdb": 438631}}}]
+    fake_trakt["watched_shows"] = [
+        {"last_watched_at": "2024-05-01T20:00:00.000Z", "show": {"ids": {"tmdb": 95396}},
+         "seasons": [{"number": 1, "episodes": [{"number": n} for n in range(1, 10)]}]},
+        {"show": {"ids": {"tmdb": 4242}}, "seasons": [{"number": 1, "episodes": [{"number": 1}]}]}]  # not listed
+    res = await call(hass, "trakt_sync")
+    assert res["watchlist_from_trakt"] == 2
+    lib = hub.library
+    assert lib.data["items"]["movie:438631"]["watched"] is True
+    assert lib.data["items"]["tv:95396"]["progress"] == {"season": 1, "episode": 9}
+    assert "tv:4242" not in lib.data["items"]
+    lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
+    assert lists["Films"] == [] and [v["title"] for v in lists["Shows"]] == ["Severance"]
+    # nothing new next time
+    assert (await call(hass, "trakt_sync"))["watchlist_from_trakt"] == 0
+
+
+async def test_the_genre_filter_narrows_the_watchlists(hass, setup):
+    from homeassistant.core import HomeAssistant  # noqa: F401
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "add_to_list", list="Films", title="Dune")
+    hub.library.data["items"]["tv:95396"]["details"]["genres"] = ["Drama"]
+    hub.library.data["items"]["movie:438631"]["details"]["genres"] = ["Science Fiction"]
+    hub.changed()
+    await hass.async_block_till_done()
+    sel = "select.tv_tracker_genre"
+    assert hass.states.get(sel).attributes["options"] == ["All genres", "Drama", "Science Fiction"]
+    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "Drama"}, blocking=True)
+    await hass.async_block_till_done()
+    a = attrs(hass, "sensor.tv_tracker_watchlists")
+    assert a["genre"] == "Drama"
+    assert [v["title"] for v in a["lists"]["Shows"]] == ["Severance"] and a["lists"]["Films"] == []
+    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "All genres"}, blocking=True)
+    await hass.async_block_till_done()
+    assert len(attrs(hass, "sensor.tv_tracker_watchlists")["lists"]["Films"]) == 1
+
+
+
+async def test_trakt_watchlist_and_lists_are_copied_once_and_never_put_back(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["watchlist"] = [
+        {"id": 11, "type": "movie", "movie": {"title": "Dune", "ids": {"tmdb": 438631}}},
+        {"id": 12, "type": "episode", "episode": {"ids": {"tmdb": 9}}}]              # episodes are skipped
+    fake_trakt["my_lists"] = [{"name": "Del's list", "ids": {"trakt": 77, "slug": "del-s-list"}}]
+    fake_trakt["list_items"] = {77: [{"id": 21, "type": "show", "show": {"title": "Severance", "ids": {"tmdb": 95396}}}]}
+
+    res = await call(hass, "trakt_sync")
+    assert res["imported_from_trakt_lists"] == 2
+    lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
+    assert [v["title"] for v in lists["Watchlist"]] == ["Dune"]
+    assert [v["title"] for v in lists["Del's list"]] == ["Severance"]
+
+    # taken off here: not put back by the next sync; a new Trakt entry is copied
+    await call(hass, "remove_from_list", list="Watchlist", title="Dune")
+    fake_trakt["list_items"][77].append({"id": 22, "type": "show", "show": {"ids": {"tmdb": 4242}}})
+    res = await call(hass, "trakt_sync")
+    assert res["imported_from_trakt_lists"] == 1
+    lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
+    assert lists["Watchlist"] == []
+    assert sorted(v["title"] for v in lists["Del's list"]) == ["Ghosts", "Severance"]
+    assert fake_trakt["added"] == [] and fake_trakt["hidden"] == []            # nothing written to Trakt

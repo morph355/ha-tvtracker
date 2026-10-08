@@ -473,6 +473,7 @@ class Library:
             "hidden": bool(item.get("hidden")),
             # the services you've actually watched it on (learned, or set by you)
             "watched_on": list(item.get("watch_on") or []),
+            "genres": list(details.get("genres") or []),
             "group": up_next_group(status, details.get("next_air_date"), details.get("announced_season")),
             "announced_season": details.get("announced_season"),
             # when the next episode (or the announced season) is expected, if known
@@ -480,20 +481,30 @@ class Library:
             or (details.get("announced_season") or {}).get("air_date"),
         }
 
-    def watchlists(self, today: date) -> dict[str, list[dict[str, Any]]]:
+    def watchlists(self, today: date, genre: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        """Each list's shows and films, without the ones you've finished (a film you've
+        watched, a show that has ended and you've seen all of), optionally only those
+        of one genre."""
         out: dict[str, list[dict[str, Any]]] = {
             lst["name"]: [] for lst in self.data["lists"].values()
         }
         for key, item in self.data["items"].items():
             if item.get("hidden"):
                 continue
+            v = self.view(key, today)
+            if v["status"] == "finished" or (genre and genre not in v["genres"]):
+                continue
             for list_id in item["lists"]:
                 if list_id in self.data["lists"]:
-                    out[self.data["lists"][list_id]["name"]].append(self.view(key, today))
-        order = {"watching": 0, "caught_up": 1, "want_to_watch": 2, "upcoming": 3, "finished": 4}
+                    out[self.data["lists"][list_id]["name"]].append(v)
+        order = {"watching": 0, "caught_up": 1, "want_to_watch": 2, "upcoming": 3}
         for views in out.values():
             views.sort(key=lambda v: (order.get(v["status"], 9), v["title"].lower()))
         return out
+
+    def watchlist_genres(self, today: date) -> list[str]:
+        """The genres of everything on your watchlists (for the genre filter)."""
+        return sorted({g for views in self.watchlists(today).values() for v in views for g in v["genres"]})
 
     def continue_watching(self, today: date) -> list[dict[str, Any]]:
         views = [self.view(k, today) for k in self.data["items"]]

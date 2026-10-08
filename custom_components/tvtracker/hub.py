@@ -52,6 +52,8 @@ from .logic import (
     parse_media_sessions,
     parse_trakt_episode_search,
     parse_trakt_history,
+    parse_trakt_list_items,
+    parse_trakt_watched,
     parse_trakt_watched_movies,
     response_timestamp,
 )
@@ -743,6 +745,14 @@ class TVTrackerHub:
                     result["titled_history"] += 1
                 seen.append(ev["trakt_id"])
                 result["applied"] += 1
+            try:
+                result["imported_from_trakt_lists"] = await self._import_trakt_lists(access)
+            except TraktError as err:
+                _LOGGER.warning("Could not read your Trakt lists: %s", err)
+            try:
+                result["watchlist_from_trakt"] = await self._apply_trakt_watched(access)
+            except TraktError as err:
+                _LOGGER.warning("Could not read what Trakt says you've watched: %s", err)
             tokens.update(
                 seen=seen[-3000:],
                 last_sync=now.isoformat(),
@@ -751,6 +761,74 @@ class TVTrackerHub:
             )
             self.changed()
         return result
+
+    async def _import_trakt_lists(self, access: str) -> int:
+        """Copy your Trakt watchlist (as "Watchlist") and your own Trakt lists (same
+        names) into TV Tracker lists. Only additions: each Trakt entry is copied once,
+        so something you take off a list here isn't put back, and nothing is ever
+        changed on Trakt. Returns how many entries were added."""
+        lib = self.library
+        copied: dict[str, list] = lib.data.setdefault("trakt_list_imports", {})
+        sources: list[tuple[str, str, list[dict[str, Any]]]] = [
+            ("watchlist", "Watchlist", await self.trakt.watchlist(access))
+        ]
+        for lst in await self.trakt.my_lists(access):
+            ids = lst.get("ids") or {}
+            list_id = ids.get("trakt") or ids.get("slug")
+            if list_id and lst.get("name"):
+                sources.append((f"list:{list_id}", lst["name"], await self.trakt.list_items(access, list_id)))
+        added = 0
+        for source, name, raw in sources:
+            done = copied.setdefault(source, [])
+            for media_type, tmdb_id, entry_id in parse_trakt_list_items(raw):
+                marker = entry_id or f"{media_type}:{tmdb_id}"
+                if marker in done:
+                    continue
+                key = item_key(media_type, tmdb_id)
+                try:
+                    if key not in lib.data["items"]:
+                        await self.fetch_item(media_type, tmdb_id)
+                except TMDBError as err:
+                    _LOGGER.debug("Skipping %s from Trakt list %s: %s", key, name, err)
+                    continue  # try again next sync
+                lib.add_to_list(lib.ensure_list(name), key)
+                done.append(marker)
+                added += 1
+        if added:
+            _LOGGER.info("Copied %d entries from your Trakt lists", added)
+            self.changed()
+        return added
+
+    async def _apply_trakt_watched(self, access: str) -> int:
+        """Bring watchlist items up to date with everything Trakt says you've watched,
+        however long ago (the history import only reads recent weeks): a film you've
+        seen is marked watched, a show moves forward to the furthest episode you've
+        seen. Finished ones then drop off the watchlists. Returns how many changed."""
+        lib = self.library
+        listed = {k: it for k, it in lib.data["items"].items() if it["lists"]}
+        if not listed:
+            return 0
+        kinds = {it["media_type"] for it in listed.values()}
+        watched = parse_trakt_watched(
+            await self.trakt.watched_movies(access) if "movie" in kinds else [],
+            await self.trakt.watched_shows(access) if "tv" in kinds else [],
+        )
+        changed = 0
+        for key, item in listed.items():
+            seen = watched.get(key)
+            if not seen:
+                continue
+            if item["media_type"] == "movie":
+                if not item.get("watched"):
+                    lib.mark_watched(key, True, seen["watched_at"])
+                    changed += 1
+            elif lib.set_progress(
+                key, seen["season"], seen["episode"], seen["watched_at"], only_forward=True, source="trakt"
+            ):
+                changed += 1
+        if changed:
+            _LOGGER.info("Trakt says you've watched more of %d watchlist items", changed)
+        return changed
 
     async def _scheduled_trakt(self, _now: datetime) -> None:
         await self.async_trakt_sync()

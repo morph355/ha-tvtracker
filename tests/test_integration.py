@@ -1655,7 +1655,7 @@ async def test_trakt_watched_record_updates_watchlist_items_and_finished_ones_dr
     assert lib.data["items"]["tv:95396"]["progress"] == {"season": 1, "episode": 9}
     assert "tv:4242" not in lib.data["items"]
     lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
-    assert lists["Films"] == [] and [v["title"] for v in lists["Shows"]] == ["Severance"]
+    assert lists["Films"] == [] and lists["Shows"] == []     # watched film, and a show you've started
     # nothing new next time
     assert (await call(hass, "trakt_sync"))["watchlist_from_trakt"] == 0
 

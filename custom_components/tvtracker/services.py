@@ -134,7 +134,10 @@ def async_register_services(hass: HomeAssistant) -> None:
         list_id = hub.library.ensure_list(call.data["list"])
         hub.library.add_to_list(list_id, item["key"])
         hub.changed()
-        return {"added": hub.library.view(item["key"], _today(hass))}
+        out: dict[str, Any] = {"added": hub.library.view(item["key"], _today(hass))}
+        if call.data["trakt"]:
+            out["trakt"] = await hub.async_add_to_trakt_list(hub.library.data["lists"][list_id]["name"], item)
+        return out
 
     async def remove_from_list(call: ServiceCall):
         hub = _hub(hass)
@@ -365,7 +368,11 @@ def async_register_services(hass: HomeAssistant) -> None:
     register("search", search, {vol.Required("query"): cv.string, vol.Optional("media_type"): MEDIA_TYPE})
     register("create_list", create_list, {vol.Required("name"): cv.string})
     register("delete_list", delete_list, {vol.Required("list"): cv.string})
-    register("add_to_list", add_to_list, {vol.Required("list"): cv.string, **TARGET})
+    register(
+        "add_to_list",
+        add_to_list,
+        {vol.Required("list"): cv.string, vol.Optional("trakt", default=True): cv.boolean, **TARGET},
+    )
     register("remove_from_list", remove_from_list, {vol.Required("list"): cv.string, **TARGET})
     register(
         "set_progress",

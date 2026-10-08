@@ -445,6 +445,16 @@ def fake_trakt(monkeypatch):
     async def list_items(self, token, list_id):
         return list(state.get("list_items", {}).get(list_id, []))
 
+    async def add_to_watchlist(self, token, payload):
+        state.setdefault("list_adds", []).append(("watchlist", payload))
+        kind = next(iter(payload))
+        return {"added": {kind: 1}, "existing": {}, "not_found": {}}
+
+    async def add_to_my_list(self, token, list_id, payload):
+        state.setdefault("list_adds", []).append((list_id, payload))
+        kind = next(iter(payload))
+        return {"added": {}, "existing": {kind: 1}, "not_found": {}}      # already there
+
     async def add_history(self, token, payload):
         if state["add_error"]:
             raise state["add_error"]
@@ -468,7 +478,8 @@ def fake_trakt(monkeypatch):
 
     for name, fn in (("device_code", device_code), ("poll_token", poll_token),
                      ("refresh", refresh), ("history", history), ("find_show", find_show), ("show_progress", show_progress),
-                     ("watched_movies", watched_movies), ("watched_shows", watched_shows), ("watchlist", watchlist), ("my_lists", my_lists), ("list_items", list_items), ("add_history", add_history),
+                     ("watched_movies", watched_movies), ("watched_shows", watched_shows), ("watchlist", watchlist), ("my_lists", my_lists), ("list_items", list_items),
+                     ("add_to_watchlist", add_to_watchlist), ("add_to_my_list", add_to_my_list), ("add_history", add_history),
                      ("hide", hide), ("unhide", unhide), ("search_episodes", search_episodes)):
         monkeypatch.setattr(f"custom_components.tvtracker.trakt.TraktClient.{name}", fn)
     return state
@@ -1724,3 +1735,33 @@ async def test_the_list_dropdown_shows_one_watchlist(hass, setup):
     await hass.async_block_till_done()
     assert hass.states.get(sel).state == "All lists"
     assert list(attrs(hass, "sensor.tv_tracker_watchlists")["lists"]) == ["Films"]
+
+
+
+async def test_adding_to_a_list_from_trakt_adds_it_on_trakt_too(hass, setup_trakt, fake_trakt):
+    hub = setup_trakt
+    await _connect(hass, hub)
+    fake_trakt["my_lists"] = [{"name": "Del's List", "ids": {"trakt": 77}}]
+    await call(hass, "trakt_sync")                                    # learns which lists are Trakt's
+
+    res = await call(hass, "add_to_list", list="watchlist", title="Dune")
+    assert res["trakt"] == "added on Trakt"
+    res = await call(hass, "add_to_list", list="del's list", title="Severance")
+    assert res["trakt"] == "already on the Trakt list"
+    assert fake_trakt["list_adds"] == [
+        ("watchlist", {"movies": [{"ids": {"tmdb": 438631}}]}),
+        (77, {"shows": [{"ids": {"tmdb": 95396}}]})]
+
+    # a list that isn't on Trakt, or asked not to: nothing sent
+    res = await call(hass, "add_to_list", list="Just Here", title="Ghosts")
+    assert res["trakt"] == "not sent: this list isn't one of your Trakt lists"
+    res = await call(hass, "add_to_list", list="Watchlist", title="Lanterns", trakt=False)
+    assert "trakt" not in res
+    # removing here never touches Trakt
+    await call(hass, "remove_from_list", list="Watchlist", title="Dune")
+    assert len(fake_trakt["list_adds"]) == 2
+
+
+async def test_adding_to_a_list_without_trakt_still_works(hass, setup):
+    res = await call(hass, "add_to_list", list="Watchlist", title="Dune")
+    assert res["added"]["title"] == "Dune" and res["trakt"] == "not sent: Trakt isn't connected"

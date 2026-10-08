@@ -133,5 +133,6 @@ pytest
 ### Watchlists and Trakt
 
 - Your Trakt watchlist is copied into a list called **Watchlist**, and each of your own Trakt lists into a list of the same name. Only additions: each Trakt entry is copied once, so something you take off a list here isn't put back, and nothing is changed on Trakt.
+- Adding something to one of those lists here (on the dashboard, or by asking Claude) adds it to the same Trakt list too ("Watchlist" is your Trakt watchlist). Additions only: taking it off here never removes it from Trakt.
 - Watchlists show only what you haven't started yet. Once you start a show it moves to Up next; a film you've watched is done. Trakt's full watched record is checked on every sync, so things you watched long ago count too.
 - The **Genre** dropdown on the Watchlists tab shows one genre at a time.

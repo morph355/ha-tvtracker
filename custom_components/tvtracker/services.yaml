@@ -18,9 +18,10 @@ delete_list:
 
 add_to_list:
   name: Add to watchlist
-  description: Add a show or movie (by title, or tmdb_id + media_type). The list is created if it doesn't exist.
+  description: Add a show or movie (by title, or tmdb_id + media_type). The list is created if it doesn't exist. If the list came from Trakt ("Watchlist" is your Trakt watchlist), it is added there too (never removed).
   fields:
     list: {required: true, example: "Shows", selector: {text: {}}}
+    trakt: {description: Also add it to the Trakt list of the same name, default: true, selector: {boolean: {}}}
     title: {example: "Severance", selector: {text: {}}}
     tmdb_id: {selector: {number: {min: 1, max: 99999999, mode: box}}}
     media_type: {selector: {select: {options: [tv, movie]}}}

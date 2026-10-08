@@ -1655,7 +1655,7 @@ async def test_trakt_watched_record_updates_watchlist_items_and_finished_ones_dr
     assert lib.data["items"]["tv:95396"]["progress"] == {"season": 1, "episode": 9}
     assert "tv:4242" not in lib.data["items"]
     lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
-    assert lists["Films"] == [] and [v["title"] for v in lists["Shows"]] == ["Severance"]
+    assert lists["Films"] == [] and lists["Shows"] == []     # watched film, and a show you've started
     # nothing new next time
     assert (await call(hass, "trakt_sync"))["watchlist_from_trakt"] == 0
 
@@ -1706,3 +1706,21 @@ async def test_trakt_watchlist_and_lists_are_copied_once_and_never_put_back(hass
     assert lists["Watchlist"] == []
     assert sorted(v["title"] for v in lists["Del's list"]) == ["Ghosts", "Severance"]
     assert fake_trakt["added"] == [] and fake_trakt["hidden"] == []            # nothing written to Trakt
+
+
+
+async def test_the_list_dropdown_shows_one_watchlist(hass, setup):
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "add_to_list", list="Films", title="Dune")
+    await hass.async_block_till_done()
+    sel = "select.tv_tracker_watchlist"
+    assert hass.states.get(sel).attributes["options"] == ["All lists", "Films", "Shows"]
+    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "Shows"}, blocking=True)
+    await hass.async_block_till_done()
+    a = attrs(hass, "sensor.tv_tracker_watchlists")
+    assert list(a["lists"]) == ["Shows"] and a["list"] == "Shows"
+    # the chosen list is deleted: back to all of them
+    await call(hass, "delete_list", list="Shows")
+    await hass.async_block_till_done()
+    assert hass.states.get(sel).state == "All lists"
+    assert list(attrs(hass, "sensor.tv_tracker_watchlists")["lists"]) == ["Films"]

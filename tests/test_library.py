@@ -289,3 +289,20 @@ def test_watchlists_leave_off_finished_items_and_filter_by_genre():
     assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Severance"]
     assert lib.data["items"]["movie:1"]["lists"] == [lst]       # still remembered, just not shown
     assert lib.watchlist_genres(TODAY) == ["Drama", "Science Fiction"]
+
+
+def test_watchlists_only_show_what_you_have_not_started():
+    """A show you've started is under Up next, not the watchlist, whether you're part
+    way through or caught up; a film you've watched is done."""
+    lib = make_lib()
+    lst = lib.create_list("Mine")
+    lib.add_to_list(lst, "tv:95396")
+    lib.add_to_list(lst, "movie:1")
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Dune", "Severance"]
+    lib.set_progress("tv:95396", 1, 2, NOW)                       # started, part way
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Dune"]
+    last = lib.data["items"]["tv:95396"]["details"]["last_aired"]
+    lib.set_progress("tv:95396", last["season"], last["episode"], NOW)   # caught up
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Dune"]
+    lib.mark_watched("movie:1", True, NOW)
+    assert lib.watchlists(TODAY)["Mine"] == []

@@ -467,6 +467,7 @@ class Library:
             "next_air_date": details.get("next_air_date"),
             "availability": avail["text"],
             "on_my_services": avail["on_my_services"],
+            "where": avail["where"],
             "poster": details.get("poster"),
             "lists": [self.data["lists"][i]["name"] for i in item["lists"] if i in self.data["lists"]],
             "last_watched": item.get("last_watched"),
@@ -481,7 +482,9 @@ class Library:
             or (details.get("announced_season") or {}).get("air_date"),
         }
 
-    def watchlists(self, today: date, genre: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    def watchlists(
+        self, today: date, genre: str | None = None, where: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
         """Each list's shows and films you haven't started yet, optionally only those of
         one genre. Once you start a show it lives under Up next instead; a film you've
         watched is done. (List membership is kept, just not shown.)"""
@@ -492,7 +495,11 @@ class Library:
             if item.get("hidden"):
                 continue
             v = self.view(key, today)
-            if v["status"] not in ("want_to_watch", "upcoming") or (genre and genre not in v["genres"]):
+            if (
+                v["status"] not in ("want_to_watch", "upcoming")
+                or (genre and genre not in v["genres"])
+                or (where and v["where"] != where)   # stream / other_services / rent / not_available
+            ):
                 continue
             for list_id in item["lists"]:
                 if list_id in self.data["lists"]:

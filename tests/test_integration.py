@@ -1765,3 +1765,26 @@ async def test_adding_to_a_list_from_trakt_adds_it_on_trakt_too(hass, setup_trak
 async def test_adding_to_a_list_without_trakt_still_works(hass, setup):
     res = await call(hass, "add_to_list", list="Watchlist", title="Dune")
     assert res["added"]["title"] == "Dune" and res["trakt"] == "not sent: Trakt isn't connected"
+
+
+async def test_the_where_dropdown_splits_watchlists_by_how_you_can_watch(hass, setup):
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await call(hass, "add_to_list", list="Films", title="Dune")              # on Netflix (yours)
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    hub.library.data["items"]["tv:95396"]["providers"] = {"rent": ["Apple TV Store"]}
+    hub.changed()
+    await hass.async_block_till_done()
+    sel = "select.tv_tracker_where_to_watch"
+    assert hass.states.get(sel).attributes["options"] == [
+        "Anywhere", "Stream on my services", "On other services", "Rent or buy", "Not available anywhere"]
+
+    async def titles(option):
+        await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": option}, blocking=True)
+        await hass.async_block_till_done()
+        lists = attrs(hass, "sensor.tv_tracker_watchlists")["lists"]
+        return sorted(v["title"] for items in lists.values() for v in items)
+
+    assert await titles("Stream on my services") == ["Dune"]
+    assert await titles("Rent or buy") == ["Severance"]
+    assert await titles("On other services") == []
+    assert await titles("Anywhere") == ["Dune", "Severance"]

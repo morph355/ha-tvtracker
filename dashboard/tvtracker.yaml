@@ -234,6 +234,8 @@ views:
             name: List
           - entity: select.tv_tracker_genre
             name: Genre
+          - entity: select.tv_tracker_where_to_watch
+            name: Where
       - type: markdown
         title: Watchlists
         content: |-
@@ -245,7 +247,7 @@ views:
           {% for name, items in lists.items() -%}
           ### {{ name }}
           {% if items | length == 0 -%}
-          {{ 'Nothing in ' ~ genre ~ '.' if genre else 'Nothing left to watch.' }}
+          {{ 'Nothing here with these filters.' if genre or state_attr('sensor.tv_tracker_watchlists', 'where') else 'Nothing left to watch.' }}
           {% endif -%}
           {% for v in items -%}
           - **{{ v.title }}** ({{ 'TV' if v.type == 'tv' else 'Movie' }}{% if v.year %}, {{ v.year }}{% endif %}) — {{ v.status | replace('_', ' ') }}{% if v.progress %}, at {{ v.progress }}{% endif %}{% if v.next and v.status == 'want_to_watch' %}, start {{ v.next }}{% endif %} — {{ v.availability }}{% if v.genres %} · *{{ v.genres | join(', ') }}*{% endif %}

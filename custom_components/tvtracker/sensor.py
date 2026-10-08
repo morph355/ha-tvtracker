@@ -107,11 +107,12 @@ class WatchlistsSensor(_Base):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         genre = self._hub.library.data.get("genre_filter")
-        lists = self._hub.library.watchlists(self._today(), genre)
+        where = self._hub.library.data.get("where_filter")
+        lists = self._hub.library.watchlists(self._today(), genre, where)
         chosen = self._hub.library.data.get("list_filter")
         if chosen in lists:   # one list chosen in the Watchlist dropdown
             lists = {chosen: lists[chosen]}
-        return {"lists": lists, "genre": genre, "list": chosen if chosen in lists else None}
+        return {"lists": lists, "genre": genre, "where": where, "list": chosen if chosen in lists else None}
 
 
 class HistorySensor(_Base):

@@ -940,8 +940,12 @@ def availability(item: dict[str, Any], my_services: list[str], today: date) -> d
             text = "Not available yet" + (f" (due {when})" if when else "")
         else:
             text = "Not currently available to stream"
+    where = (
+        "stream" if on_mine else "other_services" if elsewhere else "rent" if rent_buy else "not_available"
+    )
     return {
         "text": text,
+        "where": where,   # stream | other_services | rent | not_available
         "on_my_services": on_mine,
         "elsewhere": elsewhere,
         "rent_buy": rent_buy,

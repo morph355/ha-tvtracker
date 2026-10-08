@@ -21,7 +21,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     hub = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([PickerShowSelect(hub), PickerEpisodeSelect(hub), GenreSelect(hub), ListSelect(hub)])
+    async_add_entities([PickerShowSelect(hub), PickerEpisodeSelect(hub), GenreSelect(hub), ListSelect(hub), WhereSelect(hub)])
 
 
 class _PickerSelect(SelectEntity):
@@ -163,4 +163,35 @@ class ListSelect(_PickerSelect):
 
     async def async_select_option(self, option: str) -> None:
         self._hub.library.data["list_filter"] = None if option == ALL_LISTS else option
+        self._hub.changed()
+
+
+# Where you can watch it (the dropdown's wording -> the value stored and filtered on)
+WHERE_OPTIONS = {
+    "Anywhere": None,
+    "Stream on my services": "stream",
+    "On other services": "other_services",
+    "Rent or buy": "rent",
+    "Not available anywhere": "not_available",
+}
+
+
+class WhereSelect(_PickerSelect):
+    """Show only what you can watch a certain way (by TMDB's UK availability)."""
+
+    _attr_icon = "mdi:television-play"
+    _attr_options = list(WHERE_OPTIONS)
+
+    def __init__(self, hub: TVTrackerHub) -> None:
+        super().__init__(hub)
+        self._attr_name = "TV Tracker Where To Watch"
+        self._attr_unique_id = f"{DOMAIN}_where"
+
+    @property
+    def current_option(self) -> str:
+        value = self._hub.library.data.get("where_filter")
+        return next((label for label, v in WHERE_OPTIONS.items() if v == value), "Anywhere")
+
+    async def async_select_option(self, option: str) -> None:
+        self._hub.library.data["where_filter"] = WHERE_OPTIONS.get(option)
         self._hub.changed()

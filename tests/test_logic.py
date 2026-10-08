@@ -523,3 +523,19 @@ def test_trakt_watched_record_gives_watched_films_and_the_furthest_episode_of_ea
     assert parse_trakt_watched(movies, shows) == {
         "movie:438631": {"watched_at": "2019-01-01T20:00:00.000Z"},
         "tv:95396": {"watched_at": "2024-05-01T20:00:00.000Z", "season": 2, "episode": 3}}
+
+
+def test_availability_says_where_you_can_watch_it():
+    from tvt.logic import availability
+    today = date(2026, 10, 8)
+    mine = ["Netflix", "Now TV"]
+    def where(providers, details=None):
+        return availability({"providers": providers, "details": details or {"release_date": "2020-01-01"},
+                             "media_type": "movie", "watched": False}, mine, today)["where"]
+    assert where({"flatrate": ["Netflix"], "rent": ["Apple TV Store"]}) == "stream"
+    assert where({"flatrate": ["Paramount+"]}) == "other_services"
+    assert where({"rent": ["Apple TV Store"], "buy": ["Amazon Video"]}) == "rent"
+    assert where({}) == "not_available"
+    # a service you've watched it on counts as yours, even if TMDB doesn't list it
+    assert availability({"providers": {}, "details": {}, "media_type": "movie", "watch_on": ["Now TV"]},
+                        mine, today)["where"] == "stream"

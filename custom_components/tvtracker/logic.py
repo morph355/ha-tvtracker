@@ -594,6 +594,18 @@ def parse_trakt_watched_movies(items: list[dict[str, Any]] | None) -> set[int]:
     }
 
 
+def parse_trakt_list_items(items: list[dict[str, Any]] | None) -> list[tuple[str, int, int | None]]:
+    """Films and shows on a Trakt list or watchlist: (media_type, tmdb_id, trakt list-item id).
+    Episodes, seasons and people on a list are skipped."""
+    out: list[tuple[str, int, int | None]] = []
+    for it in items or []:
+        kind = {"movie": "movie", "show": "tv"}.get(it.get("type"))
+        tmdb = ((it.get(it.get("type") or "") or {}).get("ids") or {}).get("tmdb") if kind else None
+        if kind and tmdb:
+            out.append((kind, int(tmdb), it.get("id")))
+    return out
+
+
 def parse_trakt_watched(
     movies: list[dict[str, Any]] | None, shows: list[dict[str, Any]] | None
 ) -> dict[str, dict[str, Any]]:

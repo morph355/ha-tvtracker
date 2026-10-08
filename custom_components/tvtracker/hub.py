@@ -52,6 +52,7 @@ from .logic import (
     parse_media_sessions,
     parse_trakt_episode_search,
     parse_trakt_history,
+    parse_trakt_list_items,
     parse_trakt_watched,
     parse_trakt_watched_movies,
     response_timestamp,
@@ -745,6 +746,10 @@ class TVTrackerHub:
                 seen.append(ev["trakt_id"])
                 result["applied"] += 1
             try:
+                result["imported_from_trakt_lists"] = await self._import_trakt_lists(access)
+            except TraktError as err:
+                _LOGGER.warning("Could not read your Trakt lists: %s", err)
+            try:
                 result["watchlist_from_trakt"] = await self._apply_trakt_watched(access)
             except TraktError as err:
                 _LOGGER.warning("Could not read what Trakt says you've watched: %s", err)
@@ -756,6 +761,43 @@ class TVTrackerHub:
             )
             self.changed()
         return result
+
+    async def _import_trakt_lists(self, access: str) -> int:
+        """Copy your Trakt watchlist (as "Watchlist") and your own Trakt lists (same
+        names) into TV Tracker lists. Only additions: each Trakt entry is copied once,
+        so something you take off a list here isn't put back, and nothing is ever
+        changed on Trakt. Returns how many entries were added."""
+        lib = self.library
+        copied: dict[str, list] = lib.data.setdefault("trakt_list_imports", {})
+        sources: list[tuple[str, str, list[dict[str, Any]]]] = [
+            ("watchlist", "Watchlist", await self.trakt.watchlist(access))
+        ]
+        for lst in await self.trakt.my_lists(access):
+            ids = lst.get("ids") or {}
+            list_id = ids.get("trakt") or ids.get("slug")
+            if list_id and lst.get("name"):
+                sources.append((f"list:{list_id}", lst["name"], await self.trakt.list_items(access, list_id)))
+        added = 0
+        for source, name, raw in sources:
+            done = copied.setdefault(source, [])
+            for media_type, tmdb_id, entry_id in parse_trakt_list_items(raw):
+                marker = entry_id or f"{media_type}:{tmdb_id}"
+                if marker in done:
+                    continue
+                key = item_key(media_type, tmdb_id)
+                try:
+                    if key not in lib.data["items"]:
+                        await self.fetch_item(media_type, tmdb_id)
+                except TMDBError as err:
+                    _LOGGER.debug("Skipping %s from Trakt list %s: %s", key, name, err)
+                    continue  # try again next sync
+                lib.add_to_list(lib.ensure_list(name), key)
+                done.append(marker)
+                added += 1
+        if added:
+            _LOGGER.info("Copied %d entries from your Trakt lists", added)
+            self.changed()
+        return added
 
     async def _apply_trakt_watched(self, access: str) -> int:
         """Bring watchlist items up to date with everything Trakt says you've watched,

@@ -110,6 +110,9 @@ class TVTrackerHub:
             )
         )
         self._unsubs.append(
+            async_track_time_interval(self.hass, self._refresh_due, timedelta(hours=1))
+        )
+        self._unsubs.append(
             async_track_time_interval(
                 self.hass, self._poll_all_adb, timedelta(seconds=ADB_POLL_SECONDS)
             )
@@ -537,6 +540,25 @@ class TVTrackerHub:
             except TMDBError as err:  # one bad item mustn't stop the rest being refreshed
                 _LOGGER.warning("Could not refresh %s: %s", item["title"], err)
         self.changed()
+
+    async def _refresh_due(self, _now: datetime | None = None) -> int:
+        """Hourly: re-fetch only the shows whose next episode's date has arrived, so a
+        new episode shows as available the day it's out, not at the next 12-hourly
+        refresh. TMDB can take a while to catch up, so this repeats until it has."""
+        today = dt_util.now().date().isoformat()
+        due = [
+            it for it in self.library.data["items"].values()
+            if it["media_type"] == "tv" and (it.get("details") or {}).get("next_air_date")
+            and it["details"]["next_air_date"] <= today
+        ]
+        for item in due:
+            try:
+                await self.fetch_item("tv", item["tmdb_id"])
+            except TMDBError as err:
+                _LOGGER.debug("Could not refresh %s: %s", item["title"], err)
+        if due:
+            self.changed()
+        return len(due)
 
     async def _scheduled_refresh(self, _now: datetime) -> None:
         await self.async_refresh_all()

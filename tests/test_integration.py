@@ -1602,3 +1602,23 @@ async def test_catch_up_also_offers_shows_with_an_episode_available(hass, setup,
     hub.changed()
     await hass.async_block_till_done()
     assert hass.states.get("select.tv_tracker_pick_show").attributes["options"] == ["—", "Lanterns", "Severance"]
+
+
+async def test_shows_whose_next_episode_is_due_are_refreshed_hourly(hass, setup):
+    hub = hass.data[DOMAIN][setup.entry_id]
+    await call(hass, "add_to_list", list="Shows", title="Severance")
+    await call(hass, "add_to_list", list="Shows", title="Ghosts")
+    hub.library.data["items"]["tv:95396"]["details"]["next_air_date"] = "2020-01-01"   # due: refetched
+    hub.library.data["items"]["tv:4242"]["details"]["next_air_date"] = "2999-01-01"    # not due yet
+    fetched = []
+    orig = hub.fetch_item
+
+    async def counting(media_type, tmdb_id):
+        fetched.append(tmdb_id)
+        return await orig(media_type, tmdb_id)
+
+    hub.fetch_item = counting
+    assert await hub._refresh_due() == 1
+    assert fetched == [95396]
+    # TMDB's fresh copy has no past date any more, so it isn't fetched again
+    assert await hub._refresh_due() == 0

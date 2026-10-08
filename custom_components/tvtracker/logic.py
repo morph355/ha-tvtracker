@@ -817,6 +817,10 @@ def derive_status(item: dict[str, Any], today: date) -> str:
     seasons = _seasons(details)
     done = episode_index(seasons, progress["season"], progress["episode"])
     latest = episode_index(seasons, last["season"], last["episode"])
+    next_air = _parse_date(details.get("next_air_date"))
+    if next_air and next_air <= today:
+        # the next episode's date has passed but our copy of TMDB is older: it's out
+        latest += 1
     if done < latest:
         return "watching"
     return "finished" if details.get("status") in ("Ended", "Canceled") else "caught_up"

@@ -489,3 +489,15 @@ def test_a_finished_show_comes_back_when_a_new_season_is_announced():
     assert parse_details("tv", raw)["announced_season"] == {"season": 3, "air_date": "2027-07-08"}
     # and once its first episode is out, it's "available" (status is watching)
     assert up_next_group("watching", None, None) == "available"
+
+
+def test_an_episode_counts_as_out_once_its_date_has_passed_even_if_tmdb_lags():
+    """Slow Horses: caught up at S6E3, S6E4 due 7 Oct. On 8 Oct our TMDB copy still
+    says S6E3 is the latest, but the date has passed: S6E4 is available."""
+    from tvt.logic import derive_status
+    item = {"media_type": "tv", "watched": False, "progress": {"season": 6, "episode": 3},
+            "details": {"seasons": {6: 6}, "last_aired": {"season": 6, "episode": 3},
+                        "next_air_date": "2026-10-07", "status": "Returning Series"}}
+    assert derive_status(item, date(2026, 10, 6)) == "caught_up"
+    assert derive_status(item, date(2026, 10, 7)) == "watching"
+    assert derive_status(item, date(2026, 10, 8)) == "watching"

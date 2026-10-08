@@ -201,6 +201,14 @@ class TraktClient:
     async def list_items(self, token: str, list_id: int | str) -> list[dict[str, Any]]:
         return await self._get_list(f"/users/me/lists/{list_id}/items", token)
 
+    async def add_to_watchlist(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add {"movies": [...], "shows": [...]} to your Trakt watchlist."""
+        return await self._post("/sync/watchlist", token, payload)
+
+    async def add_to_my_list(self, token: str, list_id: int | str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add {"movies": [...], "shows": [...]} to one of your own Trakt lists."""
+        return await self._post(f"/users/me/lists/{list_id}/items", token, payload)
+
     async def watched_shows(self, token: str) -> list[dict[str, Any]]:
         """Every show you've watched any of, with the seasons and episodes watched."""
         return await self._get_list("/sync/watched/shows", token)

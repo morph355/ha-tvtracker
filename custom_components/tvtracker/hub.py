@@ -772,11 +772,14 @@ class TVTrackerHub:
         sources: list[tuple[str, str, list[dict[str, Any]]]] = [
             ("watchlist", "Watchlist", await self.trakt.watchlist(access))
         ]
+        trakt_ids: dict[str, Any] = {}
         for lst in await self.trakt.my_lists(access):
             ids = lst.get("ids") or {}
             list_id = ids.get("trakt") or ids.get("slug")
             if list_id and lst.get("name"):
+                trakt_ids[norm(lst["name"])] = list_id
                 sources.append((f"list:{list_id}", lst["name"], await self.trakt.list_items(access, list_id)))
+        lib.data["trakt_list_ids"] = trakt_ids   # so additions here can go to the same Trakt list
         added = 0
         for source, name, raw in sources:
             done = copied.setdefault(source, [])
@@ -798,6 +801,37 @@ class TVTrackerHub:
             _LOGGER.info("Copied %d entries from your Trakt lists", added)
             self.changed()
         return added
+
+    async def async_add_to_trakt_list(self, list_name: str, item: dict[str, Any]) -> str:
+        """Also add a show or film to the Trakt list this list came from ("Watchlist" is
+        your Trakt watchlist). Additions only: nothing is ever removed from Trakt.
+        Returns what happened, in words."""
+        if self.trakt is None or self.trakt_status != "connected":
+            return "not sent: Trakt isn't connected"
+        if norm(list_name) == norm("Watchlist"):
+            target = None
+        elif norm(list_name) in (self.library.data.get("trakt_list_ids") or {}):
+            target = self.library.data["trakt_list_ids"][norm(list_name)]
+        else:
+            return "not sent: this list isn't one of your Trakt lists"
+        kind = "movies" if item["media_type"] == "movie" else "shows"
+        payload = {kind: [{"ids": {"tmdb": item["tmdb_id"]}}]}
+        try:
+            access = await self._trakt_access_token()
+            reply = (
+                await self.trakt.add_to_watchlist(access, payload) if target is None
+                else await self.trakt.add_to_my_list(access, target, payload)
+            )
+        except TraktAuthError as err:
+            self._trakt_lost_login(err)
+            return f"not sent: {err}"
+        except TraktError as err:
+            return f"not sent: {err}"
+        if (reply.get("added") or {}).get(kind):
+            return "added on Trakt"
+        if (reply.get("existing") or {}).get(kind):
+            return "already on the Trakt list"
+        return "Trakt couldn't find it"
 
     async def _apply_trakt_watched(self, access: str) -> int:
         """Bring watchlist items up to date with everything Trakt says you've watched,

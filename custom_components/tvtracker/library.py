@@ -482,9 +482,9 @@ class Library:
         }
 
     def watchlists(self, today: date, genre: str | None = None) -> dict[str, list[dict[str, Any]]]:
-        """Each list's shows and films, without the ones you've finished (a film you've
-        watched, a show that has ended and you've seen all of), optionally only those
-        of one genre."""
+        """Each list's shows and films still to watch: not a film you've watched, nor a
+        show you've seen every aired episode of (it's under Up next until there's more),
+        optionally only those of one genre."""
         out: dict[str, list[dict[str, Any]]] = {
             lst["name"]: [] for lst in self.data["lists"].values()
         }
@@ -492,12 +492,12 @@ class Library:
             if item.get("hidden"):
                 continue
             v = self.view(key, today)
-            if v["status"] == "finished" or (genre and genre not in v["genres"]):
+            if v["status"] in ("finished", "caught_up") or (genre and genre not in v["genres"]):
                 continue
             for list_id in item["lists"]:
                 if list_id in self.data["lists"]:
                     out[self.data["lists"][list_id]["name"]].append(v)
-        order = {"watching": 0, "caught_up": 1, "want_to_watch": 2, "upcoming": 3}
+        order = {"watching": 0, "want_to_watch": 1, "upcoming": 2}
         for views in out.values():
             views.sort(key=lambda v: (order.get(v["status"], 9), v["title"].lower()))
         return out

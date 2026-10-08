@@ -289,3 +289,17 @@ def test_watchlists_leave_off_finished_items_and_filter_by_genre():
     assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Severance"]
     assert lib.data["items"]["movie:1"]["lists"] == [lst]       # still remembered, just not shown
     assert lib.watchlist_genres(TODAY) == ["Drama", "Science Fiction"]
+
+
+def test_a_show_you_are_caught_up_on_leaves_the_watchlists_until_there_is_more():
+    lib = make_lib()
+    lst = lib.create_list("Mine")
+    lib.add_to_list(lst, "tv:95396")
+    item = lib.data["items"]["tv:95396"]
+    last = item["details"]["last_aired"]
+    lib.set_progress("tv:95396", last["season"], last["episode"], NOW)
+    assert lib.view("tv:95396", TODAY)["status"] == "caught_up"
+    assert lib.watchlists(TODAY)["Mine"] == []
+    item["details"]["last_aired"] = {"season": last["season"] + 1, "episode": 1}   # a new episode is out
+    item["details"]["seasons"][last["season"] + 1] = 8
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Severance"]

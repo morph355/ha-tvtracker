@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, SIGNAL_UPDATE
 from .hub import TVTrackerHub
@@ -20,7 +21,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     hub = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([PickerShowSelect(hub), PickerEpisodeSelect(hub)])
+    async_add_entities([PickerShowSelect(hub), PickerEpisodeSelect(hub), GenreSelect(hub)])
 
 
 class _PickerSelect(SelectEntity):
@@ -100,4 +101,36 @@ class PickerEpisodeSelect(_PickerSelect):
 
     async def async_select_option(self, option: str) -> None:
         self._hub.picker["choice"] = None if option == NONE else option
+        self._hub.changed()
+
+
+ALL_GENRES = "All genres"
+
+
+class GenreSelect(_PickerSelect):
+    """Show only one genre on the watchlists."""
+
+    _attr_icon = "mdi:filter-variant"
+
+    def __init__(self, hub: TVTrackerHub) -> None:
+        super().__init__(hub)
+        self._attr_name = "TV Tracker Genre"
+        self._attr_unique_id = f"{DOMAIN}_genre"
+
+    def _genres(self) -> list[str]:
+        return self._hub.library.watchlist_genres(dt_util.now().date())
+
+    @property
+    def options(self) -> list[str]:
+        chosen = self._hub.library.data.get("genre_filter")
+        genres = self._genres()
+        # keep a chosen genre listed even if nothing on the lists has it any more
+        return [ALL_GENRES, *genres, *([chosen] if chosen and chosen not in genres else [])]
+
+    @property
+    def current_option(self) -> str:
+        return self._hub.library.data.get("genre_filter") or ALL_GENRES
+
+    async def async_select_option(self, option: str) -> None:
+        self._hub.library.data["genre_filter"] = None if option == ALL_GENRES else option
         self._hub.changed()

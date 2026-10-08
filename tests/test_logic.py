@@ -501,3 +501,25 @@ def test_an_episode_counts_as_out_once_its_date_has_passed_even_if_tmdb_lags():
     assert derive_status(item, date(2026, 10, 6)) == "caught_up"
     assert derive_status(item, date(2026, 10, 7)) == "watching"
     assert derive_status(item, date(2026, 10, 8)) == "watching"
+
+
+def test_genres_are_split_and_named_the_same_for_tv_and_films():
+    from tvt.logic import normalise_genres
+    assert normalise_genres(["Sci-Fi & Fantasy", "Drama", "Action & Adventure"]) == [
+        "Science Fiction", "Fantasy", "Drama", "Action", "Adventure"]
+    assert normalise_genres(["Science Fiction", "Fantasy", "Kids"]) == ["Science Fiction", "Fantasy", "Family"]
+    d = parse_details("tv", {"name": "X", "genres": [{"id": 1, "name": "War & Politics"}]})
+    assert d["genres"] == ["War", "Politics"]
+
+
+def test_trakt_watched_record_gives_watched_films_and_the_furthest_episode_of_each_show():
+    from tvt.logic import parse_trakt_watched
+    movies = [{"last_watched_at": "2019-01-01T20:00:00.000Z", "movie": {"ids": {"tmdb": 438631}}},
+              {"movie": {"ids": {"trakt": 5}}}]                                     # no TMDB id: ignored
+    shows = [{"last_watched_at": "2024-05-01T20:00:00.000Z", "show": {"ids": {"tmdb": 95396}},
+              "seasons": [{"number": 0, "episodes": [{"number": 9}]},                # specials ignored
+                          {"number": 1, "episodes": [{"number": 1}, {"number": 9}]},
+                          {"number": 2, "episodes": [{"number": 3}]}]}]
+    assert parse_trakt_watched(movies, shows) == {
+        "movie:438631": {"watched_at": "2019-01-01T20:00:00.000Z"},
+        "tv:95396": {"watched_at": "2024-05-01T20:00:00.000Z", "season": 2, "episode": 3}}

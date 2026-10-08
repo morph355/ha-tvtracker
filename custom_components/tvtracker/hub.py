@@ -52,6 +52,7 @@ from .logic import (
     parse_media_sessions,
     parse_trakt_episode_search,
     parse_trakt_history,
+    parse_trakt_watched,
     parse_trakt_watched_movies,
     response_timestamp,
 )
@@ -743,6 +744,10 @@ class TVTrackerHub:
                     result["titled_history"] += 1
                 seen.append(ev["trakt_id"])
                 result["applied"] += 1
+            try:
+                result["watchlist_from_trakt"] = await self._apply_trakt_watched(access)
+            except TraktError as err:
+                _LOGGER.warning("Could not read what Trakt says you've watched: %s", err)
             tokens.update(
                 seen=seen[-3000:],
                 last_sync=now.isoformat(),
@@ -751,6 +756,37 @@ class TVTrackerHub:
             )
             self.changed()
         return result
+
+    async def _apply_trakt_watched(self, access: str) -> int:
+        """Bring watchlist items up to date with everything Trakt says you've watched,
+        however long ago (the history import only reads recent weeks): a film you've
+        seen is marked watched, a show moves forward to the furthest episode you've
+        seen. Finished ones then drop off the watchlists. Returns how many changed."""
+        lib = self.library
+        listed = {k: it for k, it in lib.data["items"].items() if it["lists"]}
+        if not listed:
+            return 0
+        kinds = {it["media_type"] for it in listed.values()}
+        watched = parse_trakt_watched(
+            await self.trakt.watched_movies(access) if "movie" in kinds else [],
+            await self.trakt.watched_shows(access) if "tv" in kinds else [],
+        )
+        changed = 0
+        for key, item in listed.items():
+            seen = watched.get(key)
+            if not seen:
+                continue
+            if item["media_type"] == "movie":
+                if not item.get("watched"):
+                    lib.mark_watched(key, True, seen["watched_at"])
+                    changed += 1
+            elif lib.set_progress(
+                key, seen["season"], seen["episode"], seen["watched_at"], only_forward=True, source="trakt"
+            ):
+                changed += 1
+        if changed:
+            _LOGGER.info("Trakt says you've watched more of %d watchlist items", changed)
+        return changed
 
     async def _scheduled_trakt(self, _now: datetime) -> None:
         await self.async_trakt_sync()

@@ -476,6 +476,21 @@ def parse_providers(raw: dict[str, Any], region: str) -> dict[str, list[str]]:
     return out
 
 
+# TMDB's TV genres pair things up ("Sci-Fi & Fantasy"); films have them separately
+# ("Science Fiction", "Fantasy"). Split and rename so one filter works for both.
+_GENRE_NAMES = {"sci-fi": "Science Fiction", "kids": "Family"}
+
+
+def normalise_genres(names: Any) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        for part in re.split(r"\s*&\s*", name or ""):
+            part = _GENRE_NAMES.get(part.strip().lower(), part.strip())
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
 def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
     """Boil a TMDB details response down to what we store."""
     poster = raw.get("poster_path")
@@ -488,6 +503,7 @@ def parse_details(media_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         "first_air_date": raw.get("first_air_date") or None,
         "release_date": raw.get("release_date") or None,
         "runtime": raw.get("runtime"),
+        "genres": normalise_genres(g.get("name") for g in raw.get("genres") or []),
     }
     if media_type == "tv":
         seasons = {
@@ -576,6 +592,34 @@ def parse_trakt_watched_movies(items: list[dict[str, Any]] | None) -> set[int]:
         for it in items or []
         if ((it.get("movie") or {}).get("ids") or {}).get("tmdb")
     }
+
+
+def parse_trakt_watched(
+    movies: list[dict[str, Any]] | None, shows: list[dict[str, Any]] | None
+) -> dict[str, dict[str, Any]]:
+    """Trakt's full watched record (/sync/watched/movies and /shows) by item key:
+    {"movie:1": {"watched_at": ...}, "tv:2": {"watched_at": ..., "season": s, "episode": e}}
+    where a show's season/episode is the furthest episode watched (specials ignored)."""
+    out: dict[str, dict[str, Any]] = {}
+    for it in movies or []:
+        tmdb = ((it.get("movie") or {}).get("ids") or {}).get("tmdb")
+        if tmdb:
+            out[f"movie:{int(tmdb)}"] = {"watched_at": it.get("last_watched_at")}
+    for it in shows or []:
+        tmdb = ((it.get("show") or {}).get("ids") or {}).get("tmdb")
+        furthest = max(
+            (
+                (int(se.get("number") or 0), int(ep.get("number") or 0))
+                for se in it.get("seasons") or [] if int(se.get("number") or 0) >= 1
+                for ep in se.get("episodes") or [] if int(ep.get("number") or 0) >= 1
+            ),
+            default=None,
+        )
+        if tmdb and furthest:
+            out[f"tv:{int(tmdb)}"] = {
+                "watched_at": it.get("last_watched_at"), "season": furthest[0], "episode": furthest[1],
+            }
+    return out
 
 
 def find_episode_by_title(episodes: list[dict[str, Any]], title: str | None) -> list[dict[str, Any]]:

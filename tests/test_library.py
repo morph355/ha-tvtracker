@@ -273,3 +273,19 @@ def test_rewatching_when_the_next_episode_is_not_out_yet_guesses_nothing():
     assert item["progress"] == {"season": last["season"], "episode": last["episode"]}
     assert item["progress_source"] == "manual" and "_guess" not in s
     assert not lib.episode_unknown("tv:95396")
+
+
+def test_watchlists_leave_off_finished_items_and_filter_by_genre():
+    lib = make_lib()
+    lib.data["items"]["tv:95396"]["details"]["genres"] = ["Drama", "Science Fiction"]
+    lib.data["items"]["movie:1"]["details"]["genres"] = ["Science Fiction", "Adventure"]
+    lst = lib.create_list("Mine")
+    lib.add_to_list(lst, "tv:95396")
+    lib.add_to_list(lst, "movie:1")
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Dune", "Severance"]
+    assert lib.watchlist_genres(TODAY) == ["Adventure", "Drama", "Science Fiction"]
+    assert [v["title"] for v in lib.watchlists(TODAY, "Drama")["Mine"]] == ["Severance"]
+    lib.mark_watched("movie:1", True, NOW)                     # watched film: off the list
+    assert [v["title"] for v in lib.watchlists(TODAY)["Mine"]] == ["Severance"]
+    assert lib.data["items"]["movie:1"]["lists"] == [lst]       # still remembered, just not shown
+    assert lib.watchlist_genres(TODAY) == ["Drama", "Science Fiction"]

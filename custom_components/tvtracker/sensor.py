@@ -106,7 +106,11 @@ class WatchlistsSensor(_Base):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"lists": self._hub.library.watchlists(self._today())}
+        genre = self._hub.library.data.get("genre_filter")
+        return {
+            "lists": self._hub.library.watchlists(self._today(), genre),
+            "genre": genre,
+        }
 
 
 class HistorySensor(_Base):

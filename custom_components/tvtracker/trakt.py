@@ -190,6 +190,10 @@ class TraktClient:
     async def watched_movies(self, token: str) -> list[dict[str, Any]]:
         return await self._get_list("/sync/watched/movies", token)
 
+    async def watched_shows(self, token: str) -> list[dict[str, Any]]:
+        """Every show you've watched any of, with the seasons and episodes watched."""
+        return await self._get_list("/sync/watched/shows", token)
+
     async def add_history(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Add watches: {"shows": [...], "movies": [...]}. Returns Trakt's added/not_found."""
         return await self._post("/sync/history", token, payload)
